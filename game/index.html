@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Solmar Bay — an original open-world crime game</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a1420; font-family: Verdana, Geneva, sans-serif; }
+  canvas#gl { position: fixed; inset: 0; display: block; }
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; }
+  #mission-panel { position: absolute; top: 14px; left: 14px; background: rgba(8,18,28,.72); border-left: 4px solid #ffd860; padding: 10px 14px; max-width: 340px; border-radius: 4px; }
+  #mission-title { font-weight: bold; font-size: 17px; color: #ffd860; letter-spacing: .5px; }
+  #mission-text { font-size: 13px; margin-top: 4px; line-height: 1.4; }
+  #mission-timer { font-size: 15px; font-weight: bold; color: #ff8080; margin-top: 4px; }
+  #top-right { position: absolute; top: 14px; right: 14px; text-align: right; }
+  #stars { font-size: 26px; letter-spacing: 3px; color: #ffd860; text-shadow: 0 2px 6px #000; }
+  #stars.hot { color: #ff5040; }
+  #cash { font-size: 22px; font-weight: bold; color: #7dd87d; text-shadow: 0 2px 4px #000; }
+  #level { font-size: 13px; color: #cfe8f2; text-shadow: 0 1px 3px #000; }
+  #bottom-right { position: absolute; right: 14px; bottom: 14px; text-align: right; }
+  #health-wrap { width: 220px; height: 18px; background: rgba(0,0,0,.6); border: 1px solid #fff; border-radius: 3px; position: relative; margin-left: auto; }
+  #health-bar { height: 100%; width: 100%; background: #4caf50; }
+  #health-label { position: absolute; inset: 0; text-align: center; font-size: 12px; line-height: 18px; font-weight: bold; }
+  #ammo { font-size: 15px; font-weight: bold; margin-top: 6px; text-shadow: 0 2px 4px #000; }
+  #speed { font-size: 20px; font-weight: bold; color: #ffd860; text-shadow: 0 2px 4px #000; }
+  #minimap { position: absolute; left: 14px; bottom: 14px; border: 2px solid rgba(255,255,255,.8); border-radius: 50%; background: #2e7fa8; box-shadow: 0 4px 18px rgba(0,0,0,.5); }
+  #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 26px; font-weight: bold; color: #fff; text-shadow: 0 0 4px #000; display: none; }
+  #crosshair.fire { color: #ffd860; }
+  #prompt { position: absolute; left: 50%; bottom: 110px; transform: translateX(-50%); font-size: 16px; font-weight: bold; background: rgba(8,18,28,.75); padding: 8px 14px; border-radius: 4px; }
+  #prompt:empty { display: none; }
+  #message { position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%); font-size: 15px; background: rgba(8,18,28,.75); padding: 8px 14px; border-radius: 4px; opacity: 0; transition: opacity .3s; white-space: nowrap; }
+  #message.show { opacity: 1; }
+  #banner { position: absolute; left: 50%; top: 22%; transform: translateX(-50%); text-align: center; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #banner.show { opacity: 1; }
+  #banner-title { font-size: 42px; font-weight: bold; color: #ffd860; text-shadow: 0 3px 10px #000; letter-spacing: 2px; }
+  #banner-sub { font-size: 16px; color: #fff; text-shadow: 0 2px 6px #000; margin-top: 6px; max-width: 560px; }
+  #damage { position: absolute; inset: 0; box-shadow: inset 0 0 90px 30px rgba(255,0,0,0); transition: box-shadow .18s; }
+  #damage.hit { box-shadow: inset 0 0 90px 30px rgba(255,0,0,.32); }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(6,14,22,.72); pointer-events: auto; }
+  .overlay.hidden { display: none; }
+  .card { background: rgba(10,24,36,.94); border: 1px solid #ffd860; border-radius: 8px; padding: 28px 34px; max-width: 620px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,.6); }
+  .card h1 { font-size: 54px; margin: 0 0 6px; color: #ffd860; letter-spacing: 4px; text-shadow: 0 3px 12px #000; }
+  .card h2 { font-size: 34px; margin: 0 0 10px; color: #ffd860; letter-spacing: 2px; }
+  .card p { font-size: 15px; line-height: 1.55; color: #e8f0f5; }
+  .tag { font-style: italic; color: #ffd860; }
+  .controls { font-size: 13px; color: #b8d0de; margin: 14px 0; line-height: 1.6; }
+  .buttons { margin-top: 18px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .buttons button { pointer-events: auto; cursor: pointer; font-size: 16px; font-weight: bold; padding: 12px 22px; border: none; border-radius: 5px; background: #ffd860; color: #1a1a1a; }
+  .buttons button:hover { background: #ffe98a; }
+  .foot { font-size: 12px; color: #8aa0b0; margin-top: 16px; }
+</style>
+</head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.min.js" } }
+</script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
