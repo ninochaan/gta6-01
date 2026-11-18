@@ -1,230 +1,305 @@
-// The wanted system and the police who answer it: patrol cruisers that chase
-// and ram, foot cops who run the player down, BUSTED on capture, and a wanted
-// level that cools off when the player stays out of sight.
-import * as THREE from 'three';
-import { WANTED_TABLE, WORLD } from './config.js';
-import { clamp, groundDist, turnToward } from './rng.js';
-import { createCar } from './vehicles.js';
-import { resolveCollisions } from './city.js';
+// police.js — the Solmar Bay PD: a 0–5 star wanted level that rises on
+// witnessed crime and decays while you stay unseen, patrol spawns, pursuit
+// steering toward an intercept point, roadblocks at four stars and up, and
+// — new in v3 — officers on foot who bail out of stopped pursuit cars and
+// chase Rico down the sidewalk, plus guards posted at roadblocks.
+// v4: officers carry pistols, but the rules of engagement are strict — they
+// draw only at 3+ stars, or when Rico is shooting back, or (for a posted
+// guard) when he flees past in a car. At 1–2 stars against an unarmed man
+// on foot they stay tackle-and-bust only, exactly as in v3. Officer fire is
+// deliberately weaker than Los Brasa's: slower, less accurate, lighter hits.
 
-export function createPolice(game) {
-  return {
-    cruisers: [],
-    cops: [],
-    decayTimer: 0,
-    bustedTimer: 0,
-    spawnTimer: 0,
-    sirenOn: false,
-  };
+import * as THREE from '../vendor/three.min.js';
+import { createCar, stepCar, wrapAngle, clamp } from './vehicles.js';
+import { lineBlocked, collideCircle, clampToWorld } from './physics.js';
+import { buildPerson } from './geometry.js';
+import { ROAD_LINES, WORLD_EDGE } from './city.js';
+
+const OFFICER_SKINS = [0xf2c79b, 0xc98a5a, 0x8a5a34, 0x6e4525];
+const MAX_OFFICERS = 6;
+
+export class Wanted {
+  constructor() { this.level = 0; this.lastSeen = -99; this.lastCrime = -99; }
+  get stars() { return Math.ceil(this.level - 0.001); }
+  addCrime(amount, witnessed, now) {
+    if (witnessed || this.level > 0) {
+      this.level = Math.min(5, this.level + amount);
+      this.lastCrime = now;
+    } else if (amount >= 1) {
+      this.level = Math.min(5, this.level + amount * 0.5); // unwitnessed serious crime still stirs patrols
+      this.lastCrime = now;
+    }
+  }
+  update(dt, now, seen) {
+    if (seen) this.lastSeen = now;
+    if (this.level > 0 && now - this.lastSeen > 6 && now - this.lastCrime > 4) {
+      this.level = Math.max(0, this.level - dt * 0.055);
+    }
+  }
+  clear() { this.level = 0; }
 }
 
-export function addWanted(game, stars) {
-  game.wanted = clamp(game.wanted + stars, 0, WORLD.maxWanted);
-  game.police.decayTimer = 25;
-  if (game.wanted > 0) {
-    game.audio.startSiren();
-    game.police.sirenOn = true;
+export class PoliceSystem {
+  constructor(scene, colliders, rng) {
+    this.scene = scene; this.colliders = colliders; this.rng = rng;
+    this.cars = [];
+    this.officers = [];
+    this.roadblocks = [];
+    this.roadblockTimer = 0;
+    this.spawnTimer = 0;
   }
-  game.hud.updateStars();
-}
-
-export function setWanted(game, stars) {
-  game.wanted = clamp(stars, 0, WORLD.maxWanted);
-  game.police.decayTimer = 25;
-  if (game.wanted > 0) game.audio.startSiren();
-  game.hud.updateStars();
-}
-
-function buildPoliceCar(game, x, z, heading) {
-  const model = { id: 'cruiser', name: 'Police Cruiser', len: 4.8, wid: 2.0, h: 1.4, top: 36, accel: 20, grip: 3.0, colors: [0x1a1a1a] };
-  const car = createCar(game, x, z, heading, model, 0x1a1a1a, false);
-  car.isPolice = true;
-  car.cruise = 30;
-  // White doors and a flashing light bar.
-  const doorMat = new THREE.MeshLambertMaterial({ color: 0xe8e8e8 });
-  for (const s of [-1, 1]) {
-    const door = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.6, 1.4), doorMat);
-    door.position.set(s * (model.wid / 2 + 0.01), 0.7, 0);
-    car.mesh.add(door);
+  targetCount(level) { return level <= 0 ? 0 : Math.min(2 + Math.floor(level), 6); }
+  spawnCop(px, pz) {
+    const rng = this.rng;
+    const vertical = rng.chance(0.5);
+    const line = ROAD_LINES.reduce((best, l) => Math.abs(l - (vertical ? px : pz)) < Math.abs(best - (vertical ? px : pz)) ? l : best, ROAD_LINES[0]);
+    const car = createCar(this.scene, 0xf2f2ea, { police: true });
+    car.driver = 'police';
+    const back = rng.range(85, 130) * (rng.chance(0.5) ? 1 : -1);
+    if (vertical) car.setPos(line + 3.1, clamp(pz + back, -240, 185), back > 0 ? Math.PI : 0);
+    else car.setPos(clamp(px + back, -250, 250), line + 3.1, back > 0 ? -Math.PI / 2 : Math.PI / 2);
+    this.cars.push(car);
+    return car;
   }
-  const bar = new THREE.Group();
-  const red = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 0.3), new THREE.MeshBasicMaterial({ color: 0xff2020 }));
-  red.position.x = -0.35;
-  const blue = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 0.3), new THREE.MeshBasicMaterial({ color: 0x2040ff }));
-  blue.position.x = 0.35;
-  bar.add(red); bar.add(blue);
-  bar.position.set(0, 1.75, 0);
-  car.mesh.add(bar);
-  car.lightBar = { red, blue };
-  car.flash = Math.random() * 2;
-  return car;
-}
-
-// Build one cruiser and add it to the active response. An anchored cruiser is
-// a staged one: it holds its lane and paces the player (or sits parked with
-// its light bar flashing when the player is on foot) instead of chasing.
-export function spawnPoliceCruiser(game, x, z, heading, anchor) {
-  const car = buildPoliceCar(game, x, z, heading);
-  car.shotAnchor = !!anchor;
-  game.police.cruisers.push(car);
-  return car;
-}
-
-function buildFootCop(game, x, z) {
-  const g = new THREE.Group();
-  const navy = new THREE.MeshLambertMaterial({ color: 0x1a2a4a });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xc89878 });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.85, 0.4), navy);
-  torso.position.y = 1.15;
-  torso.castShadow = true;
-  g.add(torso);
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.42, 0.42), skin);
-  head.position.y = 1.82;
-  g.add(head);
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.12, 8), navy);
-  cap.position.y = 2.05;
-  g.add(cap);
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.75, 0.28), navy);
-  legL.position.set(-0.19, 0.38, 0);
-  g.add(legL);
-  const legR = legL.clone();
-  legR.position.x = 0.19;
-  g.add(legR);
-  g.position.set(x, 0, z);
-  game.scene.add(g);
-  return { group: g, legL, legR, pos: new THREE.Vector3(x, 0, z), heading: 0, walkPhase: 0, grabTimer: 0 };
-}
-
-export function updatePolice(game, dt) {
-  const police = game.police;
-  const player = game.player;
-  const wanted = game.wanted;
-
-  // Wanted cools off when the player commits no crime and no police is near.
-  if (wanted > 0) {
-    police.decayTimer -= dt;
-    const near = police.cruisers.some((c) => groundDist(c.pos.x, c.pos.z, player.pos.x, player.pos.z) < 30)
-      || police.cops.some((c) => groundDist(c.pos.x, c.pos.z, player.pos.x, player.pos.z) < 30);
-    if (police.decayTimer <= 0 && !near) {
-      game.wanted = wanted - 1;
-      police.decayTimer = 25;
-      game.hud.updateStars();
-      game.hud.showMessage('The heat is cooling off…');
-      if (game.wanted === 0) { game.audio.stopSiren(); police.sirenOn = false; }
+  // ---- foot officers -------------------------------------------------------
+  spawnOfficer(x, z, heading, car) {
+    const live = this.officers.filter((o) => !o.dead).length;
+    if (live >= MAX_OFFICERS) return null;
+    const group = buildPerson(THREE, {
+      skin: this.rng.pick(OFFICER_SKINS), shirt: 0x1e3a5f, pants: 0x22242c, hat: 0x16283f,
+    });
+    group.position.set(x, 0, z);
+    this.scene.add(group);
+    // v4: a holstered sidearm — a small dark box at the hip that only shows
+    // (in the raised arm line) once the officer has drawn under the rules
+    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.14, 0.34),
+      new THREE.MeshBasicMaterial({ color: 0x1c1c20 }));
+    gun.position.set(0.42, 1.12, 0.18);
+    gun.visible = false;
+    group.add(gun);
+    const officer = {
+      group, gun, x, z, heading: heading ?? 0, speed: 0,
+      health: 40, dead: false, state: 'pursue', car: car || null,
+      bob: this.rng.range(0, 6), staggerT: 0, corpseT: 0,
+      shootCd: this.rng.range(1.2, 2.4), drawn: false,
+    };
+    group.rotation.y = officer.heading;
+    this.officers.push(officer);
+    return officer;
+  }
+  killOfficer(officer) {
+    if (officer.dead) return;
+    officer.dead = true;
+    officer.group.rotation.x = -Math.PI / 2;
+    officer.group.position.y = 0.25;
+  }
+  removeOfficer(officer) {
+    this.scene.remove(officer.group);
+    const i = this.officers.indexOf(officer);
+    if (i >= 0) this.officers.splice(i, 1);
+  }
+  carStillPosted(car) {
+    if (!car) return false;
+    if (this.cars.includes(car)) return true;
+    return this.roadblocks.some((rb) => rb.car === car);
+  }
+  strobe(car, t) {
+    if (!car.lightbar) return;
+    const phase = (t * 6 + car.id) % 2 < 1;
+    car.lightbar.children[0].visible = phase;
+    car.lightbar.children[1].visible = !phase;
+  }
+  update(dt, G) {
+    const level = G.wanted.level;
+    const want = this.targetCount(level);
+    this.spawnTimer -= dt;
+    if (this.cars.length < want && this.spawnTimer <= 0) {
+      this.spawnCop(G.playerPos.x, G.playerPos.z);
+      this.spawnTimer = 1.6;
+    }
+    let anySees = false;
+    const t = G.now;
+    for (let i = this.cars.length - 1; i >= 0; i--) {
+      const cop = this.cars[i];
+      if (cop.dead) { this.cars.splice(i, 1); continue; }
+      const dx = G.playerPos.x - cop.x, dz = G.playerPos.z - cop.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist < 55 && !lineBlocked(this.colliders, cop.x, cop.z, G.playerPos.x, G.playerPos.z)) anySees = true;
+      if (cop.bailed) { // parked with its crew out on foot: strobe and hold
+        this.strobe(cop, t);
+        cop.setBraking(true);
+        continue;
+      }
+      if (level <= 0) { // stand down: slow to a stop and despawn politely
+        stepCar(cop, cop.speed > 0.5 ? -0.4 : 0, 0, dt, this.colliders, { maxSpeed: 12 });
+        // v3 fix: a stopped car only pops away once the player has left it
+        // behind — never while it sits right next to them
+        if (dist > 70 || (cop.speed === 0 && dist > 14)) { this.scene.remove(cop.group); this.cars.splice(i, 1); }
+        continue;
+      }
+      if (dist > 300) { // recycle far units back into the hunt
+        this.scene.remove(cop.group); this.cars.splice(i, 1); continue;
+      }
+      // bail out: close, slow, and the player is on foot — the chase leaves
+      // the car and continues down the sidewalk
+      if (!G.playerInCar && dist < 17 && Math.abs(cop.speed) < 7) {
+        const rx = Math.cos(cop.heading), rz = -Math.sin(cop.heading);
+        this.spawnOfficer(cop.x + rx * 1.9, cop.z + rz * 1.9, cop.heading, cop);
+        this.spawnOfficer(cop.x - rx * 1.9, cop.z - rz * 1.9, cop.heading, cop);
+        cop.parked = true; cop.bailed = true; cop.speed = 0;
+        cop.sync();
+        this.strobe(cop, t);
+        continue;
+      }
+      // steer at an intercept point ahead of the player
+      const lead = clamp(dist / 38, 0, 1.4);
+      const tx = G.playerPos.x + G.playerVel.x * lead, tz = G.playerPos.z + G.playerVel.z * lead;
+      const desired = Math.atan2(tx - cop.x, tz - cop.z);
+      const diff = wrapAngle(desired - cop.heading);
+      const steer = clamp(diff * 1.9, -1, 1);
+      let throttle = 0.9;
+      if (dist < 6 && G.playerSpeed < 2) throttle = 0;            // boxed in: hold and bust
+      else if (dist < 10) throttle = 0.35;
+      if (Math.abs(diff) > 2.4 && cop.speed > 6) throttle = -0.5; // too sharp: brake and swing round
+      stepCar(cop, throttle, steer, dt, this.colliders, { maxSpeed: 30 + level * 1.6 });
+      this.strobe(cop, t);
+      cop.setBraking(throttle < 0);
+    }
+    // foot officers
+    for (let i = this.officers.length - 1; i >= 0; i--) {
+      const off = this.officers[i];
+      if (off.dead) {
+        off.corpseT += dt;
+        if (off.corpseT > 15) this.removeOfficer(off);
+        continue;
+      }
+      const dx = G.playerPos.x - off.x, dz = G.playerPos.z - off.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist < 45 && !lineBlocked(this.colliders, off.x, off.z, G.playerPos.x, G.playerPos.z)) anySees = true;
+      // v4 rules of engagement: draw only at 3+ stars, or when Rico is
+      // shooting back, or — for a posted roadblock guard — when he flees
+      // past in a vehicle. Otherwise the pistol stays holstered.
+      const playerFiring = G.now - (G.playerFiredAt ?? -99) < 6;
+      off.engaged = !!(G.wanted.stars >= 3 || playerFiring || (G.playerInCar && off.state === 'guard' && level > 0));
+      off.drawn = off.engaged && dist < 42;
+      if (off.gun) off.gun.visible = off.drawn;
+      // their unit is gone (recycled or cleared): drift off once far away
+      if (off.car && !this.carStillPosted(off.car)) {
+        if (dist > 50) { this.removeOfficer(off); continue; }
+      }
+      if (off.state === 'pursue') {
+        if (level <= 0 || dist > 55 || G.playerInCar) off.state = 'return';
+      } else if (off.state === 'guard') {
+        if (!G.playerInCar && dist < 20 && level > 0) off.state = 'pursue';
+      }
+      // v4 officer fire: a drawn officer inside 34 units plants his feet and
+      // shoots on a slow cadence — lighter and less accurate than gang fire
+      // (34% hits for 3–6.5, vs the gang's 55% for 4–9), so 3 stars is
+      // dangerous but survivable, and a point-blank tackle still wins.
+      if (off.drawn && off.staggerT <= 0 && dist < 34 && dist > 2.2) {
+        off.shootCd -= dt;
+        if (off.shootCd <= 0) {
+          off.shootCd = 1.7 + Math.random() * 1.1;
+          if (G.audio) G.audio.gunshot();
+          const blocked = lineBlocked(this.colliders, off.x, off.z, G.playerPos.x, G.playerPos.z);
+          const spread = blocked ? 9 : 3.4;
+          const tx2 = G.playerPos.x + (Math.random() - 0.5) * spread;
+          const tz2 = G.playerPos.z + (Math.random() - 0.5) * spread;
+          if (G.combat) {
+            G.combat.showTracer(off.x, 1.35, off.z, tx2, 1.2, tz2);
+            G.combat.showFlash(off.x + Math.sin(off.heading) * 0.4, 1.35, off.z + Math.cos(off.heading) * 0.4, off.heading);
+          }
+          if (!blocked && Math.random() < 0.34) G.hurtPlayer(3 + Math.random() * 3.5, off.x, off.z);
+        }
+      }
+      let moveX = 0, moveZ = 0, speed = 0;
+      if (off.state === 'pursue') {
+        const leadT = 0.35;
+        const tx = G.playerPos.x + G.playerVel.x * leadT, tz = G.playerPos.z + G.playerVel.z * leadT;
+        const ddx = tx - off.x, ddz = tz - off.z, len = Math.hypot(ddx, ddz) || 1;
+        moveX = ddx / len; moveZ = ddz / len;
+        // a shooting pursuer stops to aim; a holstered one keeps running
+        speed = off.staggerT > 0 ? 0 : (off.drawn && dist < 34 && dist > 2.2 ? 0 : 6.4);
+      } else if (off.state === 'return') {
+        if (!off.car) { this.removeOfficer(off); continue; }
+        const ddx = off.car.x - off.x, ddz = off.car.z - off.z;
+        const dCar = Math.hypot(ddx, ddz);
+        if (dCar < 2.5) {
+          const rbEntry = this.roadblocks.find((rb) => rb.car === off.car);
+          if (rbEntry) { off.state = 'guard'; rbEntry.guard = off; } // resume the post
+          else { off.car.parked = false; off.car.bailed = false; this.removeOfficer(off); }
+          continue;
+        }
+        moveX = ddx / dCar; moveZ = ddz / dCar; speed = 5.6;
+      } else { // guard: hold the post, watch the player
+        if (dist > 0.01) off.heading += clamp(wrapAngle(Math.atan2(dx, dz) - off.heading), -dt * 5, dt * 5);
+      }
+      if (off.staggerT > 0) off.staggerT -= dt;
+      off.speed = speed;
+      if (speed > 0 && (moveX !== 0 || moveZ !== 0)) {
+        const targetHeading = Math.atan2(moveX, moveZ);
+        off.heading += clamp(wrapAngle(targetHeading - off.heading), -dt * 7, dt * 7);
+        off.x += Math.sin(off.heading) * speed * dt;
+        off.z += Math.cos(off.heading) * speed * dt;
+        const res = collideCircle(this.colliders, off.x, off.z, 0.45);
+        off.x = res.x; off.z = res.z;
+        clampToWorld(off, WORLD_EDGE);
+        off.bob += dt * speed * 2.4;
+      }
+      off.group.position.set(off.x, Math.abs(Math.sin(off.bob)) * (speed > 3 ? 0.09 : 0.045), off.z);
+      off.group.rotation.y = off.heading;
+      off.group.rotation.z = Math.sin(off.bob) * (speed > 0.2 ? 0.05 : 0);
+    }
+    // roadblocks at four stars: two units parked across the road ahead
+    this.roadblockTimer -= dt;
+    if (level >= 4 && this.roadblockTimer <= 0) {
+      this.placeRoadblock(G);
+      this.roadblockTimer = 26;
+    }
+    for (let i = this.roadblocks.length - 1; i >= 0; i--) {
+      const rb = this.roadblocks[i];
+      rb.age += dt;
+      this.strobe(rb.car, t);
+      if (rb.age > 30 || level < 3) {
+        if (rb.guard && !rb.guard.dead) this.removeOfficer(rb.guard);
+        this.scene.remove(rb.car.group); this.roadblocks.splice(i, 1);
+      }
+    }
+    return anySees;
+  }
+  placeRoadblock(G) {
+    const fx = Math.sin(G.playerHeading), fz = Math.cos(G.playerHeading);
+    const aheadX = G.playerPos.x + fx * 55, aheadZ = G.playerPos.z + fz * 55;
+    const vertical = Math.abs(fx) < Math.abs(fz);
+    const line = ROAD_LINES.reduce((best, l) => Math.abs(l - (vertical ? aheadX : aheadZ)) < Math.abs(best - (vertical ? aheadX : aheadZ)) ? l : best, ROAD_LINES[0]);
+    let firstCar = null;
+    for (const off of [-2.6, 2.6]) {
+      const car = createCar(this.scene, 0xf2f2ea, { police: true });
+      car.driver = 'police'; car.parked = true;
+      if (vertical) car.setPos(line + off, aheadZ, Math.PI / 2);
+      else car.setPos(aheadX, line + off, 0);
+      const entry = { car, age: 0, guard: null };
+      this.roadblocks.push(entry);
+      if (!firstCar) {
+        firstCar = car;
+        // one officer stands post beside the lead unit
+        const gx = vertical ? car.x : car.x + 2.4, gz = vertical ? car.z + 2.4 : car.z;
+        const guard = this.spawnOfficer(gx, gz, G.playerHeading, car);
+        if (guard) { guard.state = 'guard'; entry.guard = guard; }
+      }
     }
   }
-
-  // Keep the response matched to the wanted level.
-  police.spawnTimer -= dt;
-  if (police.spawnTimer <= 0) {
-    police.spawnTimer = 1.5;
-    const want = WANTED_TABLE[wanted];
-    while (police.cruisers.length < want.cruisers) {
-      const a = game.rng.range(0, Math.PI * 2);
-      const d = game.rng.range(45, 70);
-      const x = clamp(player.pos.x + Math.sin(a) * d, -300, 300);
-      const z = clamp(player.pos.z + Math.cos(a) * d, -300, 280);
-      const car = buildPoliceCar(game, x, z, Math.atan2(player.pos.x - x, player.pos.z - z));
-      police.cruisers.push(car);
-    }
-    while (police.cops.length < want.cops && player.onFoot) {
-      const a = game.rng.range(0, Math.PI * 2);
-      const d = game.rng.range(25, 40);
-      const cop = buildFootCop(game,
-        clamp(player.pos.x + Math.sin(a) * d, -300, 300),
-        clamp(player.pos.z + Math.cos(a) * d, -300, 280));
-      police.cops.push(cop);
-    }
+  nearestCopDistance(x, z) {
+    let best = Infinity;
+    for (const c of this.cars) best = Math.min(best, Math.hypot(c.x - x, c.z - z));
+    for (const rb of this.roadblocks) best = Math.min(best, Math.hypot(rb.car.x - x, rb.car.z - z));
+    for (const o of this.officers) if (!o.dead) best = Math.min(best, Math.hypot(o.x - x, o.z - z));
+    return best;
   }
-  // Stand the response down when the wanted level falls.
-  const want = WANTED_TABLE[wanted];
-  while (police.cruisers.length > want.cruisers) {
-    const car = police.cruisers.pop();
-    game.scene.remove(car.mesh);
-    game.cars.splice(game.cars.indexOf(car), 1);
-  }
-  while (police.cops.length > want.cops) {
-    const cop = police.cops.pop();
-    game.scene.remove(cop.group);
-  }
-
-  // Cruisers chase the player and ram: hard when the player is driving, and
-  // they pull alongside on foot to let a cop out.
-  for (const car of police.cruisers) {
-    // A staged cruiser holds its lane and paces the player (parked, lights
-    // flashing, while the player is on foot) so the shot keeps its framing.
-    if (car.shotAnchor) {
-      const pace = player.car ? Math.abs(player.car.speed) : 0;
-      car.speed += (pace - car.speed) * Math.min(1, dt * 2);
-      car.pos.x += Math.sin(car.heading) * car.speed * dt;
-      car.pos.z += Math.cos(car.heading) * car.speed * dt;
-      resolveCollisions(car.pos, 1.4, game.city.colliders);
-      car.mesh.position.copy(car.pos);
-      car.mesh.rotation.y = car.heading;
-      car.flash += dt * 8;
-      const on = Math.sin(car.flash) > 0;
-      car.lightBar.red.material.color.setHex(on ? 0xff2020 : 0x501010);
-      car.lightBar.blue.material.color.setHex(on ? 0x102050 : 0x2040ff);
-      continue;
-    }
-    const dx = player.pos.x - car.pos.x, dz = player.pos.z - car.pos.z;
-    const d = Math.hypot(dx, dz);
-    const wantHeading = Math.atan2(dx, dz);
-    car.heading = turnToward(car.heading, wantHeading, dt * 2.4);
-    // Pace the player when close, so a chase reads as a chase instead of a
-    // pile-up on the player's bumper.
-    const playerSpeed = player.car ? Math.abs(player.car.speed) : 0;
-    let targetSpeed = d > 60 ? 34 : 30;
-    if (d < 12) targetSpeed = Math.min(targetSpeed, playerSpeed + 2);
-    car.speed += (targetSpeed - car.speed) * Math.min(1, dt * 1.5);
-    car.pos.x += Math.sin(car.heading) * car.speed * dt;
-    car.pos.z += Math.cos(car.heading) * car.speed * dt;
-    resolveCollisions(car.pos, 1.4, game.city.colliders);
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.y = car.heading;
-    car.flash += dt * 8;
-    const on = Math.sin(car.flash) > 0;
-    car.lightBar.red.material.color.setHex(on ? 0xff2020 : 0x501010);
-    car.lightBar.blue.material.color.setHex(on ? 0x102050 : 0x2040ff);
-    // Ramming the player's car damages it and shakes the player.
-    if (player.car && d < 3.6) {
-      player.car.speed *= 0.92;
-      player.health -= 6 * dt;
-      game.audio.crash();
-      game.hud.flashDamage();
-      const push = 3.6 - d;
-      player.car.pos.x += (player.car.pos.x - car.pos.x) / Math.max(d, 0.1) * push * 0.5;
-      player.car.pos.z += (player.car.pos.z - car.pos.z) / Math.max(d, 0.1) * push * 0.5;
-    }
-    // A cruiser right on top of a player on foot ends the run (never during
-    // a staged screenshot, where the police are set dressing).
-    if (player.onFoot && d < 2.2 && !game.shotMode) {
-      police.bustedTimer += dt;
-      if (police.bustedTimer > 0.8) { game.busted(); return; }
-    }
-  }
-  if (player.onFoot) police.bustedTimer = Math.max(0, police.bustedTimer - dt);
-
-  // Foot cops run the player down; caught on foot means BUSTED.
-  for (const cop of police.cops) {
-    const dx = player.pos.x - cop.pos.x, dz = player.pos.z - cop.pos.z;
-    const d = Math.hypot(dx, dz);
-    cop.heading = turnToward(cop.heading, Math.atan2(dx, dz), dt * 5);
-    const runSpeed = player.car ? 0 : 6.8;
-    cop.pos.x += Math.sin(cop.heading) * runSpeed * dt;
-    cop.pos.z += Math.cos(cop.heading) * runSpeed * dt;
-    resolveCollisions(cop.pos, 0.5, game.city.colliders);
-    cop.walkPhase += dt * 8;
-    cop.legL.rotation.x = Math.sin(cop.walkPhase) * 0.6;
-    cop.legR.rotation.x = -Math.sin(cop.walkPhase) * 0.6;
-    cop.group.position.copy(cop.pos);
-    cop.group.rotation.y = cop.heading;
-    if (player.onFoot && d < 1.6 && !game.shotMode) {
-      cop.grabTimer += dt;
-      game.hud.showPrompt('A cop has you — break free!');
-      if (cop.grabTimer > 1.2) { game.busted(); return; }
-    } else {
-      cop.grabTimer = 0;
-    }
+  clearAll() {
+    for (const c of this.cars) this.scene.remove(c.group);
+    for (const rb of this.roadblocks) this.scene.remove(rb.car.group);
+    for (const o of this.officers) this.scene.remove(o.group);
+    this.cars = []; this.roadblocks = []; this.officers = [];
   }
 }

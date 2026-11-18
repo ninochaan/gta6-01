@@ -1,232 +1,216 @@
-// Combat: Ray's pistol and fists, tracers and muzzle flashes, and the enemy
-// gunmen who shoot back during the story missions.
-import * as THREE from 'three';
-import { PLAYER } from './config.js';
-import { groundDist } from './rng.js';
-import { addWanted } from './police.js';
+// combat.js — fists and a pistol: hitscan shots with a tracer and muzzle
+// flash, melee swings, damage to pedestrians and cars, and the Los Brasa
+// gang members who shoot back during story missions.
+// v4: cover dives pass the fight's claimed cover slots into the new
+// multi-candidate search, and each frame refreshes every member's claim
+// list so the squad spreads across different corners instead of stacking.
 
-export function createCombat(game) {
-  return {
-    enemies: [],
-    tracers: [],
-    shotsFired: 0,
-    muzzle: null,
-  };
-}
+import * as THREE from '../vendor/three.min.js';
+import { buildPerson } from './geometry.js';
+import { lineBlocked } from './physics.js';
+import { findCoverPoint } from './pedestrians.js';
 
-function buildGunman(game, x, z) {
-  const g = new THREE.Group();
-  const jacket = new THREE.MeshLambertMaterial({ color: 0x5a1a1a });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xc89878 });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.85, 0.4), jacket);
-  torso.position.y = 1.15;
-  torso.castShadow = true;
-  g.add(torso);
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.42, 0.42), skin);
-  head.position.y = 1.82;
-  g.add(head);
-  const band = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.1, 0.46), new THREE.MeshLambertMaterial({ color: 0x1a1a1a }));
-  band.position.y = 1.95;
-  g.add(band);
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.75, 0.28), new THREE.MeshLambertMaterial({ color: 0x1a1a1a }));
-  legL.position.set(-0.19, 0.38, 0);
-  g.add(legL);
-  const legR = legL.clone();
-  legR.position.x = 0.19;
-  g.add(legR);
-  // A red health bar floating over the gunman.
-  const barBg = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.14), new THREE.MeshBasicMaterial({ color: 0x301010 }));
-  barBg.position.y = 2.35;
-  g.add(barBg);
-  const barFg = new THREE.Mesh(new THREE.PlaneGeometry(1.06, 0.1), new THREE.MeshBasicMaterial({ color: 0xff3030 }));
-  barFg.position.set(0, 2.35, 0.01);
-  g.add(barFg);
-  g.position.set(x, 0, z);
-  game.scene.add(g);
-  return {
-    group: g, barFg, legL, legR,
-    pos: new THREE.Vector3(x, 0, z),
-    heading: 0, health: 100, maxHealth: 100,
-    shootTimer: game.rng.range(0.5, 1.5), walkPhase: 0, dead: false,
-  };
-}
+const GANG_PALETTE = { skin: 0xc98a5a, shirt: 0xb3231b, pants: 0x22242c, hat: 0xb3231b };
 
-export function spawnEnemies(game, spots) {
-  const list = [];
-  for (const s of spots) {
-    const e = buildGunman(game, s.x, s.z);
-    game.combat.enemies.push(e);
-    list.push(e);
+export class Combat {
+  constructor(scene, colliders, audio, peds) {
+    this.scene = scene; this.colliders = colliders; this.audio = audio; this.peds = peds;
+    this.police = null; // wired from main.js so officers are valid targets
+    this._deadSeen = new Set();
+    this.hasPistol = true;
+    this.mag = 12; this.magSize = 12; this.reserve = 60;
+    this.reloadT = 0; this.fireCd = 0;
+    this.gang = [];
+    // one reusable tracer line + a muzzle flash quad
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 1], 3));
+    this.tracer = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 }));
+    this.tracer.visible = false; this.tracer.frustumCulled = false;
+    scene.add(this.tracer);
+    this.tracerT = 0;
+    this.flash = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.55),
+      new THREE.MeshBasicMaterial({ color: 0xffc95e, transparent: true, opacity: 0.95, depthWrite: false }));
+    this.flash.visible = false;
+    scene.add(this.flash);
+    this.flashT = 0;
   }
-  return list;
-}
-
-export function clearEnemies(game) {
-  for (const e of game.combat.enemies) game.scene.remove(e.group);
-  game.combat.enemies = [];
-}
-
-// A bright line from the muzzle to the hit point, fading in a blink.
-function spawnTracer(game, from, to) {
-  const dir = new THREE.Vector3().subVectors(to, from);
-  const len = dir.length();
-  const geo = new THREE.CylinderGeometry(0.03, 0.03, len, 5);
-  const mat = new THREE.MeshBasicMaterial({ color: 0xffe080 });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(from).addScaledVector(dir, 0.5);
-  mesh.lookAt(to);
-  mesh.rotateX(Math.PI / 2);
-  game.scene.add(mesh);
-  game.combat.tracers.push({ mesh, life: 0.09 });
-}
-
-function spawnHitPuff(game, pos, color) {
-  const mat = new THREE.MeshBasicMaterial({ color: color || 0xff5040 });
-  const puff = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 6), mat);
-  puff.position.copy(pos);
-  game.scene.add(puff);
-  game.combat.tracers.push({ mesh: puff, life: 0.25, grow: true });
-}
-
-export function playerShoot(game) {
-  const player = game.player;
-  if (!player.onFoot || player.reloading > 0 || player.shootCooldown > 0) return;
-  if (player.ammo <= 0) {
-    game.audio.reload();
-    startReload(game);
-    return;
+  showTracer(x1, y1, z1, x2, y2, z2) {
+    const a = this.tracer.geometry.attributes.position.array;
+    a[0] = x1; a[1] = y1; a[2] = z1; a[3] = x2; a[4] = y2; a[5] = z2;
+    this.tracer.geometry.attributes.position.needsUpdate = true;
+    this.tracer.visible = true; this.tracerT = 0.05;
   }
-  player.ammo -= 1;
-  player.shootCooldown = 0.22;
-  game.audio.shoot();
-  game.combat.shotsFired = 1.2;
-  if (game.wanted < 1) addWanted(game, 1);
-
-  // Aim from the camera through the crosshair; the first thing hit takes it.
-  const ray = new THREE.Raycaster();
-  ray.setFromCamera(new THREE.Vector2(0, 0), game.camera);
-  ray.far = 90;
-  const targets = [];
-  for (const e of game.combat.enemies) if (!e.dead) targets.push(e.group);
-  for (const car of game.cars) targets.push(car.mesh);
-  const hits = ray.intersectObjects(targets, true);
-  const from = game.camera.position.clone();
-  let end = ray.ray.at(90, new THREE.Vector3());
-  if (hits.length > 0) {
-    end = hits[0].point;
-    let obj = hits[0].object;
-    while (obj.parent && obj.parent !== game.scene) obj = obj.parent;
-    const enemy = game.combat.enemies.find((e) => e.group === obj);
-    if (enemy && !enemy.dead) {
-      enemy.health -= PLAYER.pistolDamage;
-      spawnHitPuff(game, end);
-      if (enemy.health <= 0) {
-        enemy.dead = true;
-        game.scene.remove(enemy.group);
-        game.cash += 50;
-        game.xp += 25;
-        game.hud.showMessage('Gunman down — +$50');
+  showFlash(x, y, z, yaw) {
+    this.flash.position.set(x, y, z);
+    this.flash.rotation.set(0, yaw, 0);
+    this.flash.visible = true; this.flashT = 0.045;
+  }
+  // Hitscan from an eye point along a direction. Returns {kind, ped?, car?, dist}.
+  raycast(ox, oy, oz, dx, dy, dz, maxDist, targets) {
+    let best = maxDist, hit = { kind: 'none', dist: maxDist };
+    // buildings: march the ray in small steps (cheap, colliders are boxes)
+    for (let d = 1; d < maxDist; d += 1.2) {
+      const x = ox + dx * d, y = oy + dy * d, z = oz + dz * d;
+      if (y < 0) { best = d; hit = { kind: 'ground', dist: d }; break; }
+      let inside = false;
+      for (const c of this.colliders) {
+        if (!c.roofOnly && x > c.minX && x < c.maxX && z > c.minZ && z < c.maxZ && y < 90) { inside = true; break; }
       }
-    } else {
-      spawnHitPuff(game, end, 0xcccccc);
-      game.audio.crash();
+      if (inside) { best = d; hit = { kind: 'building', dist: d }; break; }
     }
+    // people: distance from the ray to their chest point
+    for (const p of targets) {
+      if (p.dead) continue;
+      const cx = p.x - ox, cy = 1.25 - oy, cz = p.z - oz;
+      const t = cx * dx + cy * dy + cz * dz;
+      if (t < 0 || t > best) continue;
+      const px = ox + dx * t - p.x, py = oy + dy * t - 1.25, pz = oz + dz * t - p.z;
+      if (px * px + py * py + pz * pz < 0.42) { best = t; hit = { kind: 'ped', ped: p, dist: t }; }
+    }
+    return hit;
   }
-  spawnTracer(game, from, end);
-  game.hud.flashCrosshair();
-}
-
-export function playerPunch(game) {
-  const player = game.player;
-  if (!player.onFoot || player.punchTimer > 0) return;
-  player.punchTimer = 0.35;
-  game.audio.punch();
-  const reach = 2.4;
-  for (const e of game.combat.enemies) {
-    if (e.dead) continue;
-    const d = groundDist(player.pos.x, player.pos.z, e.pos.x, e.pos.z);
-    if (d < reach) {
-      e.health -= PLAYER.punchDamage;
-      spawnHitPuff(game, new THREE.Vector3(e.pos.x, 1.4, e.pos.z));
-      if (e.health <= 0) {
-        e.dead = true;
-        game.scene.remove(e.group);
-        game.cash += 50;
-        game.xp += 25;
-        game.hud.showMessage('Knocked out — +$50');
+  // The player fires. yaw/pitch describe the camera aim. Returns what happened.
+  playerShoot(G) {
+    if (!this.hasPistol || this.reloadT > 0 || this.fireCd > 0) return null;
+    if (this.mag <= 0) { this.audio.dryFire(); this.startReload(); return null; }
+    this.mag--; this.fireCd = 0.16;
+    this.audio.gunshot();
+    const yaw = G.cameraYaw, pitch = G.cameraPitch;
+    const dx = -Math.sin(yaw) * Math.cos(pitch), dy = Math.sin(pitch), dz = -Math.cos(yaw) * Math.cos(pitch);
+    const ox = G.playerPos.x, oy = 1.55, oz = G.playerPos.z;
+    this.showFlash(ox - Math.sin(yaw) * 0.5, 1.35, oz - Math.cos(yaw) * 0.5, yaw);
+    const officers = this.police ? this.police.officers : [];
+    const targets = [...this.peds.peds, ...this.gang, ...officers];
+    const hit = this.raycast(ox, oy, oz, dx, dy, dz, 90, targets);
+    const ex = ox + dx * hit.dist, ey = oy + dy * hit.dist, ez = oz + dz * hit.dist;
+    this.showTracer(ox - Math.sin(yaw) * 0.4, 1.35, oz - Math.cos(yaw) * 0.4, ex, ey, ez);
+    // gunfire spooks the gang: nearby members may dive for cover, avoiding
+    // slots their squadmates have already claimed (v4 spread)
+    for (const p of this.gang) {
+      if (p.dead) continue;
+      if (Math.hypot(p.x - ox, p.z - oz) < 25 && Math.random() < 0.5) {
+        const claimed = this.gang.filter((q) => q !== p && !q.dead && q.coverPoint).map((q) => q.coverPoint);
+        const cp = findCoverPoint(this.colliders, p.x, p.z, ox, oz, claimed);
+        if (cp && p.mode !== 'retreat') { p.coverPoint = cp; p.mode = 'cover'; }
       }
     }
-  }
-  for (const ped of game.peds.list) {
-    const d = groundDist(player.pos.x, player.pos.z, ped.pos.x, ped.pos.z);
-    if (d < reach) {
-      ped.fleeing = 4;
-      addWanted(game, 1);
+    if (hit.kind === 'ped') {
+      hit.ped.health -= 34;
+      this.audio.thud();
+      const isOfficer = officers.includes(hit.ped);
+      if (hit.ped.health <= 0 && !hit.ped.dead) {
+        if (isOfficer) this.police.killOfficer(hit.ped);
+        else this.peds.kill(hit.ped);
+        return { killed: hit.ped };
+      }
+      if (isOfficer) { hit.ped.staggerT = 0.3; return { hit: hit.ped }; }
+      if (!hit.ped.gang) { hit.ped.state = 'flee'; hit.ped.panic = 3; hit.ped.fleeFrom = { x: ox, z: oz }; }
+      return { hit: hit.ped };
     }
+    return { missed: true };
   }
-}
-
-export function startReload(game) {
-  const player = game.player;
-  if (player.reloading > 0 || player.ammo >= PLAYER.magSize) return;
-  player.reloading = PLAYER.reloadTime;
-  game.audio.reload();
-}
-
-export function updateCombat(game, dt) {
-  const player = game.player;
-  if (player.shootCooldown > 0) player.shootCooldown -= dt;
-  if (player.reloading > 0) {
-    player.reloading -= dt;
-    if (player.reloading <= 0) {
-      const need = PLAYER.magSize - player.ammo;
-      const take = Math.min(need, player.reserve);
-      player.ammo += take;
-      player.reserve -= take;
+  playerMelee(G) {
+    let best = null, bd = 2.3;
+    const officers = this.police ? this.police.officers : [];
+    for (const p of [...this.peds.peds, ...this.gang, ...officers]) {
+      if (p.dead) continue;
+      const d = Math.hypot(p.x - G.playerPos.x, p.z - G.playerPos.z);
+      if (d < bd) { bd = d; best = p; }
     }
-  }
-  // Fade and drop spent tracers and hit puffs.
-  for (let i = game.combat.tracers.length - 1; i >= 0; i--) {
-    const t = game.combat.tracers[i];
-    t.life -= dt;
-    if (t.grow) t.mesh.scale.multiplyScalar(1 + dt * 6);
-    if (t.life <= 0) {
-      game.scene.remove(t.mesh);
-      game.combat.tracers.splice(i, 1);
+    if (best) {
+      best.health -= 18;
+      this.audio.thud();
+      const isOfficer = officers.includes(best);
+      if (best.health <= 0) {
+        if (isOfficer) this.police.killOfficer(best);
+        else this.peds.kill(best);
+        return { killed: best };
+      }
+      if (isOfficer) { best.staggerT = 0.3; return { hit: best }; }
+      if (!best.gang) { best.state = 'flee'; best.panic = 2.6; best.fleeFrom = { x: G.playerPos.x, z: G.playerPos.z }; }
+      return { hit: best };
     }
+    return null;
   }
-  // Gunmen: close in to shooting range, then fire back with poor aim.
-  for (const e of game.combat.enemies) {
-    if (e.dead) continue;
-    const d = groundDist(e.pos.x, e.pos.z, player.pos.x, player.pos.z);
-    e.heading = Math.atan2(player.pos.x - e.pos.x, player.pos.z - e.pos.z);
-    e.group.rotation.y = e.heading;
-    if (d > 14) {
-      e.pos.x += Math.sin(e.heading) * 3.2 * dt;
-      e.pos.z += Math.cos(e.heading) * 3.2 * dt;
-      e.walkPhase += dt * 6;
-      e.legL.rotation.x = Math.sin(e.walkPhase) * 0.5;
-      e.legR.rotation.x = -Math.sin(e.walkPhase) * 0.5;
-    } else {
-      e.shootTimer -= dt;
-      if (e.shootTimer <= 0 && player.onFoot) {
-        e.shootTimer = game.rng.range(0.9, 1.8);
-        game.audio.shoot();
-        const from = new THREE.Vector3(e.pos.x, 1.5, e.pos.z);
-        const to = new THREE.Vector3(player.pos.x + game.rng.range(-1.5, 1.5), 1.3, player.pos.z + game.rng.range(-1.5, 1.5));
-        spawnTracer(game, from, to);
-        if (game.rng.chance(0.35)) {
-          player.health -= 7;
-          game.hud.flashDamage();
-          game.audio.crash();
-        }
+  startReload() {
+    if (this.reloadT > 0 || this.mag >= this.magSize || this.reserve <= 0) return;
+    this.reloadT = 1.1;
+    this.audio.reload();
+  }
+  spawnGang(x, z, n) {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const ped = this.peds.spawn({ x: x + (i % 3) * 2.4 - 2.4, z: z + Math.floor(i / 3) * 2.4 });
+      // repaint the gang member in Los Brasa red
+      this.scene.remove(ped.group);
+      ped.group = buildPerson(THREE, GANG_PALETTE);
+      ped.group.position.set(ped.x, 0, ped.z);
+      this.scene.add(ped.group);
+      ped.gang = true; ped.health = 65; ped.state = 'fight';
+      ped.shootCd = 1 + Math.random() * 1.4;
+      // v3 tactics: a flank slot around the player, a mode, a staggered clock
+      ped.flank = n <= 1 ? 0 : -0.9 + (1.8 * i) / (n - 1);
+      ped.mode = 'advance';
+      ped.modeT = 1.4 + i * 0.8 + Math.random() * 0.9;
+      ped.coverPoint = null; ped.preferFar = false; ped.retreatCd = 0;
+      this.gang.push(ped); out.push(ped);
+    }
+    return out;
+  }
+  clearGang() {
+    for (const p of this.gang) this.peds.remove(p);
+    this.gang = [];
+    this._deadSeen.clear();
+  }
+  // A fallen member rattles the rest: everyone close by dives for a box.
+  reactToDeath(corpse, G) {
+    for (const p of this.gang) {
+      if (p.dead || p === corpse) continue;
+      if (Math.hypot(p.x - corpse.x, p.z - corpse.z) < 18 && p.mode !== 'retreat') {
+        const claimed = this.gang.filter((q) => q !== p && !q.dead && q.coverPoint).map((q) => q.coverPoint);
+        const cp = findCoverPoint(this.colliders, p.x, p.z, G.playerPos.x, G.playerPos.z, claimed);
+        if (cp) { p.coverPoint = cp; p.mode = 'cover'; }
       }
     }
-    e.group.position.copy(e.pos);
-    const frac = Math.max(0, e.health / e.maxHealth);
-    e.barFg.scale.x = frac;
-    e.barFg.position.x = -(1 - frac) * 0.53;
-    e.barFg.lookAt(game.camera.position);
   }
-  game.combat.enemies = game.combat.enemies.filter((e) => !e.dead);
+  // Gang return fire + timers; damages the player through G.hurtPlayer.
+  update(dt, G) {
+    if (this.fireCd > 0) this.fireCd -= dt;
+    if (this.tracerT > 0) { this.tracerT -= dt; if (this.tracerT <= 0) this.tracer.visible = false; }
+    if (this.flashT > 0) { this.flashT -= dt; if (this.flashT <= 0) this.flash.visible = false; }
+    if (this.reloadT > 0) {
+      this.reloadT -= dt;
+      if (this.reloadT <= 0) {
+        const take = Math.min(this.magSize - this.mag, this.reserve);
+        this.mag += take; this.reserve -= take;
+      }
+    }
+    // v4: keep every fighter's claimed-cover list current (everyone else's
+    // live cover points), so the pedestrians.js mode machine spreads out
+    for (const p of this.gang) {
+      if (p.dead) continue;
+      p.coverClaims = this.gang.filter((q) => q !== p && !q.dead && q.coverPoint).map((q) => q.coverPoint);
+    }
+    for (const p of this.gang) {
+      if (p.dead) {
+        if (!this._deadSeen.has(p)) { this._deadSeen.add(p); this.reactToDeath(p, G); }
+        continue;
+      }
+      p.target = G.playerPos;
+      p.shootCd -= dt;
+      const d = Math.hypot(p.x - G.playerPos.x, p.z - G.playerPos.z);
+      const mayFire = p.mode === 'advance' || p.mode === 'peek' || p.mode === undefined;
+      if (p.shootCd <= 0 && d < 30 && !G.playerInCar && mayFire) {
+        p.shootCd = 1.15 + Math.random() * 1.3;
+        this.audio.gunshot();
+        const blocked = lineBlocked(this.colliders, p.x, p.z, G.playerPos.x, G.playerPos.z);
+        const spread = blocked ? 9 : 2.6;
+        const tx = G.playerPos.x + (Math.random() - 0.5) * spread;
+        const tz = G.playerPos.z + (Math.random() - 0.5) * spread;
+        this.showTracer(p.x, 1.35, p.z, tx, 1.2, tz);
+        if (!blocked && Math.random() < 0.55) G.hurtPlayer(4 + Math.random() * 5, p.x, p.z);
+      }
+    }
+  }
+  gangAlive() { return this.gang.filter((p) => !p.dead).length; }
 }
