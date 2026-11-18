@@ -1,28 +1,53 @@
-// v3: unchanged — the seeded generator and its call order are untouched, so the city generates identically.
-// rng.js — a tiny deterministic seeded random generator (mulberry32) plus helpers.
-// Solmar Bay is generated from a fixed seed so the city, the screenshot states and
-// the hidden-package spots are identical on every load and every machine.
+// rng.js — a seeded random generator (mulberry32) plus small helpers.
+// City generation and staging read the seed from the ?seed= query value so
+// a given seed always builds the same Solmar Bay.
 
 export function makeRng(seed) {
-  let a = seed >>> 0;
+  let state = (seed >>> 0) || 1;
   const next = () => {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-  return {
-    next,
-    range: (lo, hi) => lo + next() * (hi - lo),
-    int: (lo, hi) => Math.floor(lo + next() * (hi - lo + 1)),
-    pick: (arr) => arr[Math.floor(next() * arr.length)],
-    chance: (p) => next() < p,
-  };
+  next.range = (lo, hi) => lo + next() * (hi - lo);
+  next.int = (lo, hi) => Math.floor(next.range(lo, hi + 1));
+  next.pick = (list) => list[Math.floor(next() * list.length) % list.length];
+  next.chance = (p) => next() < p;
+  return next;
 }
 
-// A hash of a string into a seed, so named spots vary but stay stable.
-export function seedFromText(text) {
-  let h = 2166136261;
-  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return h >>> 0;
+export function seedFromQuery() {
+  try {
+    const raw = new URLSearchParams(location.search).get('seed');
+    const n = raw === null ? NaN : parseInt(raw, 10);
+    return Number.isFinite(n) ? n : 20261;
+  } catch {
+    return 20261;
+  }
+}
+
+export function queryParam(name) {
+  try {
+    return new URLSearchParams(location.search).get(name);
+  } catch {
+    return null;
+  }
+}
+
+export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+export const lerp = (a, b, t) => a + (b - a) * t;
+export const dist2d = (ax, az, bx, bz) => Math.hypot(ax - bx, az - bz);
+export function angLerp(a, b, t) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+export function angDiff(a, b) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }

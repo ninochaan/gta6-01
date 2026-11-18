@@ -1,157 +1,180 @@
-// geometry.js — merge many small boxes and quads into ONE BufferGeometry so the
-// whole static city renders in a handful of draw calls. Two flavours:
-//   ColorBucket — vertex-coloured boxes/quads (roads, props, car bodies, people)
-//   UvBucket    — textured boxes whose sides sample a facade-atlas tile and whose
-//                 top samples a plain roof patch of the same atlas (buildings)
-// Both buckets are write-only piles of triangles; call build() once at startup.
+// geometry.js — low-poly builders. Most props are boxes merged into a
+// single vertex-coloured BufferGeometry, so one mesh equals one draw call.
+// Buildings ride on InstancedMesh with canvas facades; palms are instanced
+// with fronds built from two chained drooping segments.
 
-import * as THREE from '../vendor/three.min.js';
+import * as THREE from 'three';
+
+// A box part: centre, size, hex colour, optional euler rotation.
+export function box(x, y, z, w, h, d, color, rx, ry, rz) {
+  return { x, y, z, w, h, d, color, rx: rx || 0, ry: ry || 0, rz: rz || 0 };
+}
 
 const FACES = [
-  // normal, then the four corners (counter-clockwise seen from outside)
-  { n: [0, 0, 1], c: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },   // +z
-  { n: [0, 0, -1], c: [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]] }, // -z
-  { n: [1, 0, 0], c: [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]] },   // +x
-  { n: [-1, 0, 0], c: [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]] }, // -x
-  { n: [0, 1, 0], c: [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]] },   // +y top
-  { n: [0, -1, 0], c: [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]] }, // -y bottom
+  { n: [0, 0, 1], c: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },
+  { n: [0, 0, -1], c: [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]] },
+  { n: [1, 0, 0], c: [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]] },
+  { n: [-1, 0, 0], c: [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]] },
+  { n: [0, 1, 0], c: [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]] },
+  { n: [0, -1, 0], c: [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]] },
 ];
+const UVS = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
-function rotateY(x, z, cos, sin) { return [x * cos - z * sin, x * sin + z * cos]; }
-// Local tilt helpers for the palm fronds: a point is pitched around X and
-// rolled around Z in its own frame before the Y heading is applied, so a
-// length along local X can rise or droop without moving its centre.
-function tiltPoint(x, y, z, cosX, sinX, cosZ, sinZ) {
-  const y1 = y * cosX - z * sinX, z1 = y * sinX + z * cosX;
-  return [x * cosZ - y1 * sinZ, x * sinZ + y1 * cosZ, z1];
-}
-
-export class ColorBucket {
-  constructor() { this.pos = []; this.nor = []; this.col = []; this.idx = []; this.vert = 0; }
-  // Axis-aligned or Y-rotated box. cx,cy,cz is its centre; sx,sy,sz its size.
-  // rotZ/rotX tilt the box in its local frame first (for drooping fronds);
-  // with both zero the output is identical to the plain Y-rotated box.
-  box(cx, cy, cz, sx, sy, sz, color, rotY = 0, rotZ = 0, rotX = 0) {
-    const col = new THREE.Color(color);
-    const cos = Math.cos(rotY), sin = Math.sin(rotY);
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
-    const tilted = rotZ !== 0 || rotX !== 0;
-    const hx = sx / 2, hy = sy / 2, hz = sz / 2;
+export function mergeBoxes(parts) {
+  const pos = [];
+  const nor = [];
+  const col = [];
+  const uv = [];
+  const idx = [];
+  const c = new THREE.Color();
+  const m = new THREE.Matrix4();
+  const e = new THREE.Euler();
+  const v = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  let base = 0;
+  for (const p of parts) {
+    c.set(p.color);
+    e.set(p.rx, p.ry, p.rz);
+    m.makeRotationFromEuler(e);
     for (const f of FACES) {
-      for (const [lx, ly, lz] of f.c) {
-        let px = lx * hx, py = ly * hy, pz = lz * hz;
-        let nx = f.n[0], ny = f.n[1], nz = f.n[2];
-        if (tilted) {
-          [px, py, pz] = tiltPoint(px, py, pz, cosX, sinX, cosZ, sinZ);
-          [nx, ny, nz] = tiltPoint(nx, ny, nz, cosX, sinX, cosZ, sinZ);
-        }
-        const [rx, rz] = rotY ? rotateY(px, pz, cos, sin) : [px, pz];
-        const [fnx, fnz] = rotY ? rotateY(nx, nz, cos, sin) : [nx, nz];
-        this.pos.push(cx + rx, cy + py, cz + rz);
-        this.nor.push(fnx, ny, fnz);
-        this.col.push(col.r, col.g, col.b);
+      n.set(f.n[0], f.n[1], f.n[2]).transformDirection(m);
+      for (let k = 0; k < 4; k++) {
+        const cc = f.c[k];
+        v.set(cc[0] * p.w / 2, cc[1] * p.h / 2, cc[2] * p.d / 2).applyMatrix4(m);
+        pos.push(v.x + p.x, v.y + p.y, v.z + p.z);
+        nor.push(n.x, n.y, n.z);
+        col.push(c.r, c.g, c.b);
+        uv.push(UVS[k][0], UVS[k][1]);
       }
-      const b = this.vert;
-      this.idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
-      this.vert += 4;
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      base += 4;
     }
-    return this;
   }
-  // Flat quad on the ground (normal +y), handy for road paint and rugs.
-  quad(cx, cz, sx, sz, y, color, rotY = 0) {
-    const col = new THREE.Color(color);
-    const cos = Math.cos(rotY), sin = Math.sin(rotY);
-    const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-    for (const [lx, lz] of corners) {
-      const [rx, rz] = rotY ? rotateY(lx * sx / 2, lz * sz / 2, cos, sin) : [lx * sx / 2, lz * sz / 2];
-      this.pos.push(cx + rx, y, cz + rz);
-      this.nor.push(0, 1, 0);
-      this.col.push(col.r, col.g, col.b);
-    }
-    const b = this.vert;
-    this.idx.push(b, b + 2, b + 1, b, b + 3, b + 2);
-    this.vert += 4;
-    return this;
-  }
-  build(material) {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
-    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
-    g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
-    g.setIndex(this.idx);
-    const mesh = new THREE.Mesh(g, material);
-    mesh.matrixAutoUpdate = false;
-    return mesh;
-  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
 }
 
-// A textured building: sides read a facade tile of the atlas, the roof reads a
-// small solid patch, so one material serves every building in the city.
-export class UvBucket {
-  constructor() { this.pos = []; this.nor = []; this.uv = []; this.idx = []; this.vert = 0; }
-  // tileU/tileV: bottom-left of the facade tile in UV space; tileW/tileH its size.
-  // roofU/roofV: a point inside the roof patch. tint multiplies via vertex colour.
-  building(cx, cz, w, d, h, tile, roofPoint) {
-    const hx = w / 2, hz = d / 2;
-    const side = (corners, n, flip) => {
-      for (let i = 0; i < 4; i++) {
-        const [x, y, z] = corners[i];
-        this.pos.push(cx + x, y, cz + z);
-        this.nor.push(n[0], n[1], n[2]);
-        const u = tile.u + (flip ? (i === 1 || i === 2 ? 0 : tile.w) : (i === 1 || i === 2 ? tile.w : 0));
-        const v = tile.v + (i >= 2 ? tile.h : 0);
-        this.uv.push(u, v);
-      }
-      const b = this.vert;
-      this.idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
-      this.vert += 4;
-    };
-    side([[-hx, 0, hz], [hx, 0, hz], [hx, h, hz], [-hx, h, hz]], [0, 0, 1], false);
-    side([[hx, 0, -hz], [-hx, 0, -hz], [-hx, h, -hz], [hx, h, -hz]], [0, 0, -1], false);
-    side([[hx, 0, hz], [hx, 0, -hz], [hx, h, -hz], [hx, h, hz]], [1, 0, 0], false);
-    side([[-hx, 0, -hz], [-hx, 0, hz], [-hx, h, hz], [-hx, h, -hz]], [-1, 0, 0], false);
-    // roof
-    const roofCorners = [[-hx, hz], [hx, hz], [hx, -hz], [-hx, -hz]];
-    for (const [x, z] of roofCorners) {
-      this.pos.push(cx + x, h, cz + z);
-      this.nor.push(0, 1, 0);
-      this.uv.push(roofPoint.u, roofPoint.v);
-    }
-    const b = this.vert;
-    this.idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
-    this.vert += 4;
-    return this;
+export const colourMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+
+export function meshOf(parts, shadows) {
+  const mesh = new THREE.Mesh(mergeBoxes(parts), colourMaterial);
+  if (shadows) {
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
   }
-  build(material) {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
-    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
-    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
-    g.setIndex(this.idx);
-    const mesh = new THREE.Mesh(g, material);
-    mesh.matrixAutoUpdate = false;
-    return mesh;
-  }
+  return mesh;
 }
 
-// One low-poly humanoid as a single vertex-coloured mesh: legs, torso, arms, head.
-// Returns a Group whose inner mesh can bob; feet at y=0, about 1.75 tall.
-export function buildPerson(THREEref, palette) {
-  const b = new ColorBucket();
-  const skin = palette.skin, shirt = palette.shirt, pants = palette.pants;
-  b.box(-0.11, 0.42, 0, 0.16, 0.84, 0.2, pants);          // left leg
-  b.box(0.11, 0.42, 0, 0.16, 0.84, 0.2, pants);           // right leg
-  b.box(0, 1.12, 0, 0.52, 0.58, 0.3, shirt);              // torso
-  b.box(-0.36, 1.1, 0, 0.13, 0.6, 0.16, shirt);           // left arm
-  b.box(0.36, 1.1, 0, 0.13, 0.6, 0.16, shirt);            // right arm
-  b.box(0, 1.58, 0, 0.3, 0.34, 0.3, skin);                // head
-  if (palette.hat !== undefined) b.box(0, 1.79, 0, 0.36, 0.09, 0.36, palette.hat);
-  const mat = new THREEref.MeshLambertMaterial({ vertexColors: true });
-  const mesh = b.build(mat);
-  mesh.castShadow = true;
-  const group = new THREEref.Group();
+// A car: body, cabin, wheels, lights. Brake lights are a separate small
+// mesh so traffic can flash them. Police cars get a light bar.
+export function buildCarMesh(color, isPolice) {
+  const group = new THREE.Group();
+  const paint = isPolice ? 0xf2f4f6 : color;
+  const parts = [
+    box(0, 0.52, 0, 1.8, 0.55, 4.1, paint),
+    box(0, 0.92, -0.2, 1.6, 0.5, 2.0, isPolice ? 0x22304a : 0x2c3844),
+    box(0, 0.3, 1.95, 1.7, 0.28, 0.25, 0x333a42),
+    box(0, 0.3, -1.95, 1.7, 0.28, 0.25, 0x333a42),
+  ];
+  if (isPolice) {
+    parts.push(box(0, 0.62, 0, 1.84, 0.18, 1.1, 0x22304a));
+    parts.push(box(0, 1.24, -0.2, 1.0, 0.14, 0.4, 0x222222));
+  }
+  const wheelG = new THREE.CylinderGeometry(0.34, 0.34, 0.24, 8);
+  wheelG.rotateZ(Math.PI / 2);
+  const wheelM = new THREE.MeshLambertMaterial({ color: 0x181a1c });
+  const body = meshOf(parts, true);
+  group.add(body);
+  for (const [wx, wz] of [[-0.85, 1.3], [0.85, 1.3], [-0.85, -1.3], [0.85, -1.3]]) {
+    const w = new THREE.Mesh(wheelG, wheelM);
+    w.position.set(wx, 0.34, wz);
+    group.add(w);
+  }
+  const head = new THREE.Mesh(
+    mergeBoxes([box(-0.55, 0.55, 2.06, 0.4, 0.16, 0.05, 0xfff2b0), box(0.55, 0.55, 2.06, 0.4, 0.16, 0.05, 0xfff2b0)]),
+    new THREE.MeshBasicMaterial({ vertexColors: true })
+  );
+  group.add(head);
+  const brakeMat = new THREE.MeshBasicMaterial({ vertexColors: true, color: 0x661111 });
+  const brake = new THREE.Mesh(
+    mergeBoxes([box(-0.55, 0.58, -2.06, 0.42, 0.15, 0.05, 0xff2a1a), box(0.55, 0.58, -2.06, 0.42, 0.15, 0.05, 0xff2a1a)]),
+    brakeMat
+  );
+  group.add(brake);
+  let bar = null;
+  let barMat = null;
+  if (isPolice) {
+    barMat = new THREE.MeshBasicMaterial({ color: 0xff2222 });
+    bar = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.1, 0.3), barMat);
+    bar.position.set(0, 1.36, -0.2);
+    group.add(bar);
+  }
+  group.userData = { brakeMat, barMat };
+  return group;
+}
+
+// A person: legs, torso, arms, head — one merged mesh, origin at feet.
+export function buildPersonMesh(shirt, pants, skin) {
+  return meshOf([
+    box(-0.14, 0.42, 0, 0.2, 0.84, 0.22, pants),
+    box(0.14, 0.42, 0, 0.2, 0.84, 0.22, pants),
+    box(0, 1.08, 0, 0.52, 0.55, 0.28, shirt),
+    box(-0.36, 1.05, 0, 0.14, 0.6, 0.16, shirt),
+    box(0.36, 1.05, 0, 0.14, 0.6, 0.16, shirt),
+    box(0, 1.55, 0, 0.3, 0.34, 0.3, skin),
+    box(0, 1.76, 0, 0.32, 0.08, 0.32, 0x2c2620),
+  ], true);
+}
+
+// Palm frond crown: six fronds, each two chained segments — the first
+// reaches out and slightly up, the second hangs from its tip, drooping.
+export function palmCrownGeometry() {
+  const parts = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const dx = Math.cos(a);
+    const dz = Math.sin(a);
+    const tipX = dx * 1.5;
+    const tipZ = dz * 1.5;
+    parts.push(box(dx * 0.75, 0.22, dz * 0.75, 1.6, 0.07, 0.34, 0x3f7d3a, dz * 0.35, 0, -dx * 0.35));
+    parts.push(box(tipX + dx * 0.65, -0.28, tipZ + dz * 0.65, 1.4, 0.06, 0.28, 0x4c8f43, dz * 0.95, 0, -dx * 0.95));
+  }
+  parts.push(box(0, -0.1, 0, 0.34, 0.3, 0.34, 0x6e5136));
+  return mergeBoxes(parts);
+}
+
+export function lampGeometry() {
+  return mergeBoxes([
+    box(0, 2.6, 0, 0.16, 5.2, 0.16, 0x3c4148),
+    box(0, 5.2, 0.55, 0.14, 0.14, 1.3, 0x3c4148),
+    box(0, 5.05, 1.15, 0.34, 0.16, 0.5, 0xffe9a8),
+  ]);
+}
+
+export function boatMesh(color) {
+  return meshOf([
+    box(0, 0.5, 0, 2.2, 0.8, 6.4, color),
+    box(0, 1.1, -0.6, 1.7, 0.6, 2.6, 0xf0ece2),
+    box(0, 2.2, -0.6, 0.12, 1.8, 0.12, 0x8a6f4d),
+    box(0, 2.6, 0.4, 0.08, 0.9, 2.2, 0xf6f2e6, 0.35, 0, 0),
+  ]);
+}
+
+export function markerMesh(color) {
+  const g = new THREE.CylinderGeometry(2.2, 2.2, 9, 12, 1, true);
+  const m = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.position.y = 4.5;
+  const group = new THREE.Group();
   group.add(mesh);
-  group.userData.body = mesh;
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(2.2, 16), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+  disc.rotation.x = -Math.PI / 2;
+  disc.position.y = 0.06;
+  group.add(disc);
   return group;
 }

@@ -1,437 +1,368 @@
-// city.js — builds Solmar Bay: a seeded coastal grid city with textured towers
-// downtown, beachfront hotels, suburbs, a marina, palm avenues, streetlights,
-// painted roads and one enterable safehouse interior. Static geometry is merged
-// into a few big meshes; palms and lamps are InstancedMeshes. Also exports the
-// gameplay data other systems need: building colliders, road lines, package
-// spots, the safehouse, and respawn points.
-// v4: a third interior — Tienda Brisa, a corner shop with a working till
-// (health, vests, pistol ammo) — joins the safehouse and Tito's Garage, and
-// the clouds and marina boats are merged into one mesh each to pay the
-// triangle/draw-call cost of the new room.
+// city.js — Solmar Bay's layout: a road grid every 56 units from -280 to
+// +280, seeded buildings with colliders in every quadrant, a downtown
+// core, the beachfront boulevard, the east marina with its pier, and the
+// three enterable interiors (safehouse, Tito's Garage, Tienda Brisa).
 
-import * as THREE from '../vendor/three.min.js';
-import { ColorBucket, UvBucket } from './geometry.js';
-import { makeFacadeAtlas, makeWaterTexture, makePosterTexture, tileUv, ROOF_UV } from './textures.js';
+import * as THREE from 'three';
+import { facadeTexture, groundTexture, waterTexture, posterTexture } from './textures.js';
+import { mergeBoxes, meshOf, box, palmCrownGeometry, lampGeometry, boatMesh, colourMaterial } from './geometry.js';
 
-export const ROAD_LINES = [-228, -152, -76, 0, 76, 152, 228];
-export const BOULEVARD_Z = 196;
-export const WORLD_EDGE = 262;
-const ROAD_HALF = 6, WALK_HALF = 8.6;
+export const GRID = 56;
+export const ROAD_HALF = 7;
 
-export function buildCity(scene, rng) {
-  const colliders = [];       // {minX,maxX,minZ,maxZ} solid building/wall AABBs
-  const packages = [];        // {x,y,z} hidden package spots
-  const animated = [];        // fn(dt, t) water, boats, clouds
-  const ground = new ColorBucket();
-  const paint = new ColorBucket();
+const RESERVED = [
+  { x0: -84, z0: 56, x1: -28, z1: 112 },    // Tito's Garage block
+  { x0: 56, z0: -84, x1: 112, z1: -28 },    // Tienda Brisa block
+  { x0: -224, z0: -224, x1: -168, z1: -168 }, // safehouse block
+  { x0: 0, z0: 56, x1: 56, z1: 112 },       // Marisol Vega's office plaza
+  { x0: -280, z0: 168, x1: -224, z1: 224 }, // the race start pad block: the
+  // pad at (-252, 196) is this block's centre, and a building spawning
+  // there ejects every car that tries to sit on the pad, so the race
+  // could never start. The block stays open ground on every seed.
+];
 
-  // ---- ground base: dry grass, then sand, then the sea -------------------
-  ground.quad(0, 0, 620, 620, 0, 0x93a86f);
-  ground.quad(0, 222, 620, 44, 0.03, 0xe8cf9e);                    // sand beach
-  ground.quad(0, 210, 620, 6, 0.045, 0xf2e2bc);                    // wet sand lip
-  const waterTex = makeWaterTexture(rng);
-  const water = new THREE.Mesh(
-    new THREE.PlaneGeometry(620, 130),
-    new THREE.MeshPhongMaterial({ map: waterTex, color: 0x9fd4e8, shininess: 90, specular: 0x99ccee }),
-  );
-  water.rotation.x = -Math.PI / 2;
-  water.position.set(0, 0.12, 240 + 62);
-  scene.add(water);
-  animated.push((dt) => { waterTex.offset.y += dt * 0.014; waterTex.offset.x = Math.sin(performance.now() * 0.00005) * 0.03; });
-
-  // ---- city block pavement -------------------------------------------------
-  for (let i = 0; i < ROAD_LINES.length - 1; i++) {
-    for (let j = 0; j < ROAD_LINES.length - 1; j++) {
-      const cx = (ROAD_LINES[i] + ROAD_LINES[i + 1]) / 2, cz = (ROAD_LINES[j] + ROAD_LINES[j + 1]) / 2;
-      if (cz > 170) continue;
-      ground.quad(cx, cz, 76 - WALK_HALF * 2 + 4, 76 - WALK_HALF * 2 + 4, 0.02, 0xcdbb9c);
-    }
-  }
-  ground.quad(0, 178, 620, 26, 0.02, 0xcdbb9c); // beachfront strip pavement
-
-  // ---- roads, sidewalks, lane paint, crosswalks ----------------------------
-  const asphalt = 0x474650, walk = 0xd9cfbc;
-  for (const c of ROAD_LINES) {
-    ground.quad(c, -14, WALK_HALF * 2, 424, 0.04, walk);
-    ground.quad(c, -14, ROAD_HALF * 2, 424, 0.06, asphalt);
-    if (c < 200) { // no east-west grid road south of here: the beach takes over
-      ground.quad(-14, c, 424, WALK_HALF * 2, 0.04, walk);
-      ground.quad(-14, c, 424, ROAD_HALF * 2, 0.06, asphalt);
-    }
-    for (let t = -236; t < 196; t += 12) {                          // centre dashes
-      if (ROAD_LINES.some((l) => Math.abs(t - l) < 10)) continue;
-      paint.quad(c, t, 0.35, 5, 0.09, 0xf5e9c8);
-      if (c < 200) paint.quad(t, c, 5, 0.35, 0.09, 0xf5e9c8);
-    }
-    for (const l of ROAD_LINES) {                                   // crosswalks
-      if (l > 200) continue;
-      for (let s = -5; s <= 5; s += 2) {
-        paint.quad(c + s * 0.95, l - ROAD_HALF - 1.6, 1.1, 2.6, 0.09, 0xf2f2ea);
-        paint.quad(l - ROAD_HALF - 1.6, c + s * 0.95, 2.6, 1.1, 0.09, 0xf2f2ea);
-      }
-    }
-  }
-  // beach boulevard: a wide promenade road along the sand
-  ground.quad(0, BOULEVARD_Z, 620, WALK_HALF * 2, 0.04, 0xe3d3ae);
-  ground.quad(0, BOULEVARD_Z, 620, ROAD_HALF * 2, 0.06, 0x51464a);
-  for (let t = -300; t < 300; t += 12) paint.quad(t, BOULEVARD_Z, 5, 0.35, 0.09, 0xffd977);
-
-  const groundMesh = ground.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  groundMesh.receiveShadow = true;
-  scene.add(groundMesh);
-  const paintMesh = paint.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  paintMesh.receiveShadow = true;
-  scene.add(paintMesh);
-
-  // ---- buildings (merged, facade atlas) ------------------------------------
-  const atlas = makeFacadeAtlas(rng);
-  const uvb = new UvBucket();
-  const roofSpots = [];
-  const safehouseRect = { minX: -50, maxX: -26, minZ: 102, maxZ: 126 };
-  const overlapsSafe = (minX, maxX, minZ, maxZ) =>
-    maxX > safehouseRect.minX - 2 && minX < safehouseRect.maxX + 2 && maxZ > safehouseRect.minZ - 2 && minZ < safehouseRect.maxZ + 2;
-  const garageRect = { minX: 106, maxX: 122, minZ: 108, maxZ: 120 };
-  const overlapsGarage = (minX, maxX, minZ, maxZ) =>
-    maxX > garageRect.minX - 2 && minX < garageRect.maxX + 2 && maxZ > garageRect.minZ - 2 && minZ < garageRect.maxZ + 2;
-  const shopRect = { minX: -122, maxX: -106, minZ: 31, maxZ: 45 };
-  const overlapsShop = (minX, maxX, minZ, maxZ) =>
-    maxX > shopRect.minX - 2 && minX < shopRect.maxX + 2 && maxZ > shopRect.minZ - 2 && minZ < shopRect.maxZ + 2;
-
-  for (let i = 0; i < ROAD_LINES.length - 1; i++) {
-    for (let j = 0; j < ROAD_LINES.length - 1; j++) {
-      const bx = ROAD_LINES[i] + WALK_HALF + 2, ex = ROAD_LINES[i + 1] - WALK_HALF - 2;
-      const bz = ROAD_LINES[j] + WALK_HALF + 2, ez = ROAD_LINES[j + 1] - WALK_HALF - 2;
-      if ((bz + ez) / 2 > 168) continue; // the southern row is beachfront, not blocks
-      const cx = (bx + ex) / 2, cz = (bz + ez) / 2;
-      const downtown = Math.max(0, 1 - Math.hypot(cx, cz) / 210);
-      const lots = downtown > 0.45 ? 1 : 2;                 // downtown: one tower per block
-      for (let a = 0; a < lots; a++) for (let b = 0; b < lots; b++) {
-        const lx = lots === 1 ? cx : bx + (ex - bx) * (a + 0.5) / lots;
-        const lz = lots === 1 ? cz : bz + (ez - bz) * (b + 0.5) / lots;
-        const w = (lots === 1 ? rng.range(30, 40) : rng.range(17, 25));
-        const d = (lots === 1 ? rng.range(30, 40) : rng.range(17, 25));
-        if (overlapsSafe(lx - w / 2, lx + w / 2, lz - d / 2, lz + d / 2)) continue;
-        if (overlapsGarage(lx - w / 2, lx + w / 2, lz - d / 2, lz + d / 2)) continue;
-        if (overlapsShop(lx - w / 2, lx + w / 2, lz - d / 2, lz + d / 2)) continue;
-        const h = downtown > 0.45 ? rng.range(34, 78) : downtown > 0.2 ? rng.range(16, 36) : rng.range(8, 17);
-        const tile = tileUv(rng.int(0, 7));
-        tile.h = Math.min(0.5, Math.max(0.12, h / 95));
-        uvb.building(lx, lz, w, d, h, tile, ROOF_UV);
-        colliders.push({ minX: lx - w / 2, maxX: lx + w / 2, minZ: lz - d / 2, maxZ: lz + d / 2 });
-        if (roofSpots.length < 40 && h > 14) roofSpots.push({ x: lx, y: h, z: lz });
-      }
-    }
-  }
-  // beachfront hotel row along the promenade
-  for (let x = -240; x <= 240; x += 48) {
-    const w = rng.range(26, 34), d = 16, h = rng.range(20, 38);
-    const tile = tileUv(rng.int(0, 7)); tile.h = Math.min(0.5, h / 95);
-    uvb.building(x, 178, w, d, h, tile, ROOF_UV);
-    colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: 178 - d / 2, maxZ: 178 + d / 2 });
-  }
-  const buildingsMesh = uvb.build(new THREE.MeshLambertMaterial({ map: atlas }));
-  buildingsMesh.castShadow = true;
-  buildingsMesh.receiveShadow = true;
-  scene.add(buildingsMesh);
-
-  // ---- palms (instanced) -----------------------------------------------------
-  const palmBucket = new ColorBucket();
-  palmBucket.box(0, 1.6, 0, 0.34, 3.2, 0.34, 0x8a6844);
-  palmBucket.box(0.25, 3.6, 0, 0.28, 1.2, 0.28, 0x96754e);
-  // v3 crown: each frond is two chained segments — an inner blade kicked up
-  // a few degrees, then an outer blade pitched down hard, so every tip ends
-  // below the crown base and the silhouette droops like a real palm. The
-  // blade axis after rotY=-ang runs along (cos ang, -sin ang), so segment
-  // centres are chained along that same direction.
-  for (let k = 0; k < 6; k++) {
-    const ang = (k / 6) * Math.PI * 2;
-    const dirX = Math.cos(ang), dirZ = -Math.sin(ang);
-    const wob = Math.abs(Math.sin(k * 2.7));
-    const baseY = 4.32 - wob * 0.18;
-    const up = (11 + (k % 3) * 1.5) * Math.PI / 180;          // 11–14 degrees
-    const down = -(27 + (k % 3) * 2.5) * Math.PI / 180;       // 27–32 degrees
-    const len1 = 1.25 + wob * 0.12, len2 = 1.15 - wob * 0.08;
-    const col = k % 2 ? 0x3f9e4d : 0x358f43;
-    const e1x = dirX * Math.cos(up) * len1, e1y = baseY + Math.sin(up) * len1, e1z = dirZ * Math.cos(up) * len1;
-    palmBucket.box(dirX * Math.cos(up) * len1 / 2, baseY + Math.sin(up) * len1 / 2, dirZ * Math.cos(up) * len1 / 2,
-      len1, 0.08, 0.5, col, -ang, up);
-    palmBucket.box(e1x + dirX * Math.cos(down) * len2 / 2, e1y + Math.sin(down) * len2 / 2, e1z + dirZ * Math.cos(down) * len2 / 2,
-      len2, 0.07, 0.32, col, -ang, down);
-  }
-  palmBucket.box(0.3, 4.05, 0.15, 0.3, 0.3, 0.3, 0x6e4f2a);
-  const palmGeo = palmBucket.build(new THREE.MeshLambertMaterial({ vertexColors: true })).geometry;
-  const palmSpots = [];
-  let palmRow = 0;
-  for (let x = -296; x <= 296; x += 15, palmRow++) {
-    palmSpots.push([x + rng.range(-2, 2), BOULEVARD_Z + 10.5]);
-    if (palmRow % 3 === 0) palmSpots.push([x + rng.range(-2, 2), 214 + rng.range(0, 14)]); // sand row at third density (v4 triangle budget for the shop)
-  }
-  for (const c of ROAD_LINES) for (let t = -220; t <= 160; t += 52) if (rng.chance(0.6)) palmSpots.push([c + 10.5, t + rng.range(-4, 4)]);
-  const palms = new THREE.InstancedMesh(palmGeo, new THREE.MeshLambertMaterial({ vertexColors: true }), palmSpots.length);
-  const dummy = new THREE.Object3D();
-  palmSpots.forEach(([x, z], i) => {
-    dummy.position.set(x, 0, z);
-    dummy.rotation.set(0, rng.range(0, 6.28), 0);
-    const s = rng.range(0.85, 1.3); dummy.scale.set(s, s * rng.range(0.9, 1.25), s);
-    dummy.updateMatrix();
-    palms.setMatrixAt(i, dummy.matrix);
-  });
-  palms.castShadow = true;
-  palms.instanceMatrix.needsUpdate = true;
-  scene.add(palms);
-
-  // ---- streetlights (instanced poles + glowing heads) ------------------------
-  const poleBucket = new ColorBucket();
-  poleBucket.box(0, 2.6, 0, 0.16, 5.2, 0.16, 0x3d3d44);
-  poleBucket.box(0, 5.2, 0.8, 0.14, 0.14, 1.7, 0x3d3d44);
-  const poleGeo = poleBucket.build(new THREE.MeshLambertMaterial({ vertexColors: true })).geometry;
-  const lampSpots = [];
-  for (const c of ROAD_LINES) for (let t = -228; t <= 190; t += 38) { lampSpots.push([c - 7.4, t, Math.PI / 2]); lampSpots.push([c + 7.4, t + 19, -Math.PI / 2]); }
-  for (let x = -290; x <= 290; x += 38) lampSpots.push([x, BOULEVARD_Z - 7.4, 0]);
-  const poles = new THREE.InstancedMesh(poleGeo, new THREE.MeshLambertMaterial({ vertexColors: true }), lampSpots.length);
-  const heads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 0.16, 0.9),
-    new THREE.MeshBasicMaterial({ color: 0xffe2a0 }), lampSpots.length);
-  lampSpots.forEach(([x, z, rot], i) => {
-    dummy.rotation.set(0, rot, 0); dummy.scale.set(1, 1, 1);
-    dummy.position.set(x, 0, z); dummy.updateMatrix();
-    poles.setMatrixAt(i, dummy.matrix);
-    dummy.position.set(x + Math.sin(rot) * 0.8, 5.25, z + Math.cos(rot) * 0.8); dummy.updateMatrix();
-    heads.setMatrixAt(i, dummy.matrix);
-  });
-  poles.instanceMatrix.needsUpdate = true; heads.instanceMatrix.needsUpdate = true;
-  scene.add(poles); scene.add(heads);
-
-  // ---- marina pier + boats ---------------------------------------------------
-  const wood = new ColorBucket();
-  wood.box(158, 1.0, 262, 15, 0.5, 46, 0x9a7648);
-  for (let z = 242; z <= 282; z += 8) { wood.box(151.5, 0.4, z, 0.5, 1.6, 0.5, 0x77572f); wood.box(164.5, 0.4, z, 0.5, 1.6, 0.5, 0x77572f); }
-  const pier = wood.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  pier.castShadow = true; scene.add(pier);
-  // v4: all five boats are merged into ONE mesh (they used to cost a draw
-  // call each); the whole flotilla bobs gently together instead of singly.
-  const boatCols = [0xe4572e, 0x2e7f86, 0xf2f2ea, 0xe39a2d, 0x3c6ec9];
-  const bb = new ColorBucket();
-  for (let i = 0; i < 5; i++) {
-    const col = boatCols[i];
-    const bx = 138 + i * 11, bz = 252 + (i % 2) * 16;
-    bb.box(bx, 0.5, bz, 2.6, 0.9, 6.4, col);
-    bb.box(bx, 1.15, bz - 0.6, 1.8, 0.7, 2.4, 0xf7f3e8);
-    bb.box(bx, 2.6, bz + 0.9, 0.12, 3.4, 0.12, 0x8a6844);
-    bb.box(bx, 2.9, bz + 1.5, 0.05, 2.0, 1.3, 0xfff6da);
-  }
-  const boatsMesh = bb.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  boatsMesh.matrixAutoUpdate = true;
-  boatsMesh.position.y = 0.15;
-  scene.add(boatsMesh);
-  animated.push((dt, t) => { boatsMesh.position.y = 0.15 + Math.sin(t * 0.9) * 0.07; boatsMesh.rotation.z = Math.sin(t * 0.7) * 0.006; });
-
-  // ---- drifting low clouds ----------------------------------------------------
-  // v4: all clouds merged into ONE mesh that drifts as a single sky sheet
-  // (eight draw calls became one; the sheet wraps around the world edge).
-  const cb = new ColorBucket();
-  const cloudBase = [];
-  for (let i = 0; i < 8; i++) {
-    const cx = rng.range(-320, 320), cy = rng.range(85, 120), cz = rng.range(-320, 240);
-    cloudBase.push(cx);
-    cb.box(cx, cy, cz, rng.range(22, 40), 2.2, rng.range(9, 15), 0xffffff);
-    cb.box(cx + rng.range(-9, 9), cy + 1.2, cz + rng.range(-3, 3), rng.range(12, 20), 2, 8, 0xffffff);
-  }
-  const cloudsMesh = cb.build(new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.82 }));
-  cloudsMesh.matrixAutoUpdate = true;
-  scene.add(cloudsMesh);
-  animated.push((dt) => { cloudsMesh.position.x += dt * 1.6; if (cloudsMesh.position.x > 90) cloudsMesh.position.x = -90; });
-
-  // ---- the safehouse: an enterable room --------------------------------------
-  const safehouse = buildSafehouse(scene, colliders);
-
-  // ---- Tito's Garage: the second interior, a working repair bay -------------
-  const garage = buildGarage(scene, colliders);
-
-  // ---- Tienda Brisa: the third interior, a corner shop with a till ---------
-  const shop = buildShop(scene, colliders);
-
-  // ---- hidden package spots: alleys, the beach, the pier, quiet corners -----
-  const alleySpots = [
-    { x: -69, y: 0.6, z: -69 }, { x: 69, y: 0.6, z: 69 }, { x: -145, y: 0.6, z: 10 }, { x: 145, y: 0.6, z: -140 },
-    { x: 10, y: 0.6, z: -145 }, { x: -10, y: 0.6, z: 145 }, { x: 219, y: 0.6, z: 40 }, { x: -219, y: 0.6, z: -40 },
-    { x: 60, y: 0.6, z: 214 }, { x: -120, y: 0.6, z: 226 }, { x: 200, y: 0.6, z: 220 }, { x: -250, y: 0.6, z: 208 },
-    { x: 158, y: 1.9, z: 280 }, { x: 30, y: 0.6, z: -250 }, { x: -38, y: 0.6, z: 96 },
-    { x: -160, y: 0.6, z: -180 }, { x: 110, y: 0.6, z: 117.5 }, { x: -90, y: 0.6, z: -20 }, { x: 96, y: 0.6, z: -190 },
-    { x: 240, y: 0.6, z: 186 },
-  ];
-  for (const s of alleySpots) packages.push(s);
-  while (packages.length > 20) packages.pop();
-
-  return {
-    colliders, packages, animated, safehouse, garage, shop,
-    water,
-    playerStart: { x: -38, z: 132, heading: Math.PI },
-    policeStation: { x: 88, z: -88 },
-    hospital: { x: -88, z: 88 },
-    update(dt, t) { for (const fn of animated) fn(dt, t); },
-  };
+function inReserved(bx, bz) {
+  return RESERVED.some((r) => bx >= r.x0 && bz >= r.z0 && bx < r.x1 && bz < r.z1);
 }
 
-// The safehouse interior: stucco walls with a door gap on the south side, a bed,
-// a table, posters and a glowing save point. Walls join the collider list.
-function buildSafehouse(scene, colliders) {
-  const cx = -38, cz = 114, hw = 7, hd = 5.5, wallH = 3.4, th = 0.45;
-  const b = new ColorBucket();
-  const stucco = 0xf2dfba, inner = 0xe8d3ac;
-  const wall = (x, z, sx, sz) => { b.box(x, wallH / 2, z, sx, wallH, sz, stucco); colliders.push({ minX: x - sx / 2, maxX: x + sx / 2, minZ: z - sz / 2, maxZ: z + sz / 2 }); };
-  wall(cx, cz - hd, hw * 2 + th, th);                       // north wall
-  wall(cx - hw, cz, th, hd * 2);                            // west wall
-  wall(cx + hw, cz, th, hd * 2);                            // east wall
-  wall(cx - 4.4, cz + hd, 5.2, th);                         // south wall, west of door
-  wall(cx + 4.4, cz + hd, 5.2, th);                         // south wall, east of door
-  // a terracotta pergola rim instead of a full roof: the sun (and the chase
-  // camera) can still see in, so the room reads as a place, not a box
-  b.box(cx, wallH + 0.3, cz - hd - 0.6, hw * 2 + 2.6, 0.28, 1.5, 0xc9563c);
-  b.box(cx, wallH + 0.3, cz + hd + 0.6, hw * 2 + 2.6, 0.28, 1.5, 0xc9563c);
-  b.box(cx - hw - 0.6, wallH + 0.3, cz, 1.5, 0.28, hd * 2 + 2.6, 0xc9563c);
-  b.box(cx + hw + 0.6, wallH + 0.3, cz, 1.5, 0.28, hd * 2 + 2.6, 0xc9563c);
-  for (let s = -hw + 1.5; s < hw; s += 2.6) b.box(cx + s, wallH + 0.28, cz, 0.5, 0.2, hd * 2, 0xb34a32); // pergola slats
-  b.quad(cx, cz, hw * 2, hd * 2, 0.1, 0xb98d5f);             // wooden floor
-  b.quad(cx, cz + 1, 6.4, 4.2, 0.13, 0x9a3f2e);             // rug
-  // bed: frame, mattress, pillow, blanket
-  b.box(cx - 4.6, 0.35, cz - 3.2, 2.2, 0.5, 4.4, 0x77572f);
-  b.box(cx - 4.6, 0.72, cz - 3.2, 2.0, 0.28, 4.2, 0xf7f3e8);
-  b.box(cx - 4.6, 0.92, cz - 4.9, 1.7, 0.18, 0.8, 0xffffff);
-  b.box(cx - 4.6, 0.9, cz - 2.2, 2.0, 0.16, 2.2, 0x2e7f86);
-  // table + crates + a plant
-  b.box(cx + 4.4, 0.55, cz - 3.4, 2.6, 0.14, 1.4, 0x8a6844);
-  b.box(cx + 3.4, 0.27, cz - 3.4, 0.14, 0.55, 1.2, 0x77572f); b.box(cx + 5.4, 0.27, cz - 3.4, 0.14, 0.55, 1.2, 0x77572f);
-  b.box(cx + 5.6, 0.45, cz + 3.6, 0.9, 0.9, 0.9, 0xa67c4e); b.box(cx + 5.6, 1.3, cz + 3.6, 0.7, 0.7, 0.7, 0xb98d5f);
-  b.box(cx - 6.2, 0.3, cz + 4.2, 0.55, 0.6, 0.55, 0xc9563c); b.box(cx - 6.2, 0.95, cz + 4.2, 0.8, 0.7, 0.8, 0x3f9e4d);
-  const mesh = b.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  mesh.castShadow = true; mesh.receiveShadow = true;
-  scene.add(mesh);
-  // posters on the north wall, facing into the room, plus a warm lamp glow
-  const posterKinds = ['surf', 'car', 'wanted'];
-  posterKinds.forEach((kind, i) => {
-    const poster = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.9),
-      new THREE.MeshBasicMaterial({ map: makePosterTexture(kind) }));
-    poster.position.set(cx - 3.4 + i * 3.4, 1.9, cz - hd + th / 2 + 0.04);
+export class City {
+  constructor(scene, rng) {
+    this.colliders = [];
+    this.boats = [];
+    this.policeStation = { x: 20, z: 66 };
+    this.hospital = { x: -20, z: 66 };
+    this.buildGround(scene);
+    this.buildSea(scene);
+    this.buildBuildings(scene, rng);
+    this.buildPalmsAndLamps(scene, rng);
+    this.buildMarina(scene, rng);
+    this.garage = this.buildGarage(scene);
+    this.shop = this.buildShop(scene);
+    this.safehouse = this.buildSafehouse(scene);
+    this.buildLandmarks(scene);
+  }
+
+  buildGround(scene) {
+    const tex = groundTexture();
+    const mat = new THREE.MeshLambertMaterial({ map: tex });
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), mat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+  }
+
+  buildSea(scene) {
+    this.waterTex = waterTexture();
+    this.waterTex.repeat.set(10, 10);
+    const mat = new THREE.MeshLambertMaterial({ map: this.waterTex, transparent: true, opacity: 0.94 });
+    const bay = new THREE.Mesh(new THREE.PlaneGeometry(230, 110), mat);
+    bay.rotation.x = -Math.PI / 2;
+    bay.position.set(205, 0.04, 252);
+    scene.add(bay);
+    const south = new THREE.Mesh(new THREE.PlaneGeometry(900, 220), mat);
+    south.rotation.x = -Math.PI / 2;
+    south.position.set(0, -0.15, -380);
+    scene.add(south);
+    const east = new THREE.Mesh(new THREE.PlaneGeometry(220, 700), mat);
+    east.rotation.x = -Math.PI / 2;
+    east.position.set(370, -0.15, 0);
+    scene.add(east);
+  }
+
+  addBuilding(list, x, z, w, d, h, variant) {
+    list.push({ x, z, w, d, h, variant });
+    this.colliders.push({ x, z, hw: w / 2, hd: d / 2 });
+  }
+
+  buildBuildings(scene, rng) {
+    const perVariant = [[], [], [], []];
+    for (let bx = -280; bx < 280; bx += GRID) {
+      for (let bz = -280; bz < 280; bz += GRID) {
+        if (inReserved(bx, bz)) continue;
+        if (bz < -224) continue; // beach blocks stay open sand
+        if (bx >= 112 && bz >= 168) continue; // marina grounds
+        if (bx >= 56 && bz >= 224) continue; // bay shore
+        const cx = bx + 28;
+        const cz = bz + 28;
+        const downtown = Math.hypot(cx, cz) < 130;
+        const variant = rng.int(0, 3);
+        if (rng.chance(0.45)) {
+          const w = rng.range(24, 32);
+          const d = rng.range(24, 32);
+          const h = downtown ? rng.range(20, 40) : rng.range(9, 20);
+          this.addBuilding(perVariant[variant], cx + rng.range(-3, 3), cz + rng.range(-3, 3), w, d, h, variant);
+        } else {
+          for (const [ox, oz] of [[-11, -11], [11, -11], [-11, 11], [11, 11]]) {
+            if (rng.chance(0.22)) continue;
+            const w = rng.range(13, 17);
+            const d = rng.range(13, 17);
+            const h = downtown ? rng.range(14, 30) : rng.range(6, 14);
+            this.addBuilding(perVariant[variant], cx + ox, cz + oz, w, d, h, variant);
+          }
+        }
+      }
+    }
+    // The downtown tower watching the crossing near x 69, z 67.
+    this.addBuilding(perVariant[1], 74, 74, 20, 20, 34, 1);
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    geo.translate(0, 0.5, 0);
+    const dummy = new THREE.Object3D();
+    perVariant.forEach((list, vi) => {
+      if (!list.length) return;
+      const mat = new THREE.MeshLambertMaterial({ map: facadeTexture(rng) });
+      const inst = new THREE.InstancedMesh(geo, mat, list.length);
+      list.forEach((b, i) => {
+        dummy.position.set(b.x, 0, b.z);
+        dummy.scale.set(b.w, b.h, b.d);
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+      });
+      inst.castShadow = true;
+      inst.receiveShadow = true;
+      scene.add(inst);
+    });
+  }
+
+  buildPalmsAndLamps(scene, rng) {
+    const spots = [];
+    for (let x = -266; x <= 266; x += 19) {
+      spots.push([x + rng.range(-2, 2), -186]);
+      spots.push([x + rng.range(-2, 2), -238]);
+    }
+    for (let z = -160; z <= 160; z += 38) spots.push([238, z + rng.range(-3, 3)]);
+    for (let i = 0; i < 26; i++) spots.push([rng.range(-260, 260), rng.range(-244, -230)]);
+    spots.push([140, 190], [176, 190], [140, 150], [120, 214], [190, 200]);
+    const trunkGeo = new THREE.CylinderGeometry(0.13, 0.24, 5.6, 6);
+    trunkGeo.translate(0, 2.8, 0);
+    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x8a6f4d });
+    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, spots.length);
+    const crownGeo = palmCrownGeometry();
+    crownGeo.translate(0, 5.6, 0);
+    const crowns = new THREE.InstancedMesh(crownGeo, colourMaterial, spots.length);
+    const dummy = new THREE.Object3D();
+    spots.forEach(([x, z], i) => {
+      dummy.position.set(x, 0, z);
+      dummy.rotation.set(rng.range(-0.05, 0.05), rng.range(0, 6.28), rng.range(-0.05, 0.05));
+      const s = rng.range(0.85, 1.2);
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+      crowns.setMatrixAt(i, dummy.matrix);
+    });
+    trunks.castShadow = true;
+    scene.add(trunks);
+    scene.add(crowns);
+    // Street lamps at intersections and mid-blocks.
+    const lampSpots = [];
+    for (let x = -280; x <= 280; x += GRID) {
+      for (let z = -280; z <= 280; z += GRID) {
+        lampSpots.push([x + 9, z + 9]);
+        if (z < 260) lampSpots.push([x + 9, z + 37]);
+      }
+    }
+    const lamps = new THREE.InstancedMesh(lampGeometry(), colourMaterial, lampSpots.length);
+    lampSpots.forEach(([x, z], i) => {
+      dummy.position.set(x, 0, z);
+      dummy.rotation.set(0, (i % 4) * Math.PI / 2, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      lamps.setMatrixAt(i, dummy.matrix);
+    });
+    scene.add(lamps);
+  }
+
+  buildMarina(scene, rng) {
+    // Pier deck: x 149..167, running from the shore out to z 284.
+    const deck = meshOf([
+      box(158, 0.1, 240, 18, 0.2, 92, 0x9a7c58),
+      box(158, -0.7, 200, 1.2, 1.6, 1.2, 0x6e5136),
+      box(158, -0.7, 240, 1.2, 1.6, 1.2, 0x6e5136),
+      box(158, -0.7, 280, 1.2, 1.6, 1.2, 0x6e5136),
+      box(149.5, 0.65, 240, 0.25, 0.9, 92, 0x7c6244),
+      box(166.5, 0.65, 240, 0.25, 0.9, 92, 0x7c6244),
+    ]);
+    scene.add(deck);
+    // Marina office and crates on the shore.
+    const office = meshOf([box(128, 3, 196, 16, 6, 10, 0xd9c9a8), box(128, 6.4, 196, 17, 0.7, 11, 0xa03a3a)]);
+    scene.add(office);
+    this.colliders.push({ x: 128, z: 196, hw: 8, hd: 5 });
+    const crates = meshOf([
+      box(120, 0.8, 224, 1.6, 1.6, 1.6, 0xb8862e), box(123, 0.8, 224, 1.6, 1.6, 1.6, 0x2e7d6b),
+      box(121.5, 2.3, 224, 1.6, 1.4, 1.6, 0x38618f), box(186, 0.8, 214, 1.6, 1.6, 1.6, 0xa03a3a),
+    ]);
+    scene.add(crates);
+    this.colliders.push({ x: 121.5, z: 224, hw: 2.6, hd: 1.2 });
+    const boatCols = [0xf0ece2, 0xc95f2e, 0x38618f, 0x2e7d6b, 0xe3cfa5];
+    for (let i = 0; i < 5; i++) {
+      const b = boatMesh(boatCols[i]);
+      b.position.set(186 + (i % 2) * 22, 0, 224 + i * 13);
+      b.rotation.y = Math.PI / 2 + rng.range(-0.15, 0.15);
+      scene.add(b);
+      this.boats.push({ mesh: b, baseY: 0, phase: rng.range(0, 6) });
+    }
+  }
+
+  // Walls with a door gap; returns the room record. Wall segments become
+  // colliders so the rooms are genuinely enterable on foot (and the
+  // garage, whose door is wide, by car).
+  buildRoom(scene, cx, cz, w, d, wallColor, floorColor, doorW, doorWall) {
+    const hw = w / 2;
+    const hd = d / 2;
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshLambertMaterial({ color: floorColor }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(cx, 0.03, cz);
+    floor.receiveShadow = true;
+    scene.add(floor);
+    const parts = [];
+    const H = 3.4;
+    const T = 0.4;
+    const seg = (x, z, sw, sd) => {
+      parts.push(box(x, H / 2, z, sw, H, sd, wallColor));
+      this.colliders.push({ x, z, hw: sw / 2, hd: sd / 2 });
+    };
+    // North and south walls (door may split the south wall).
+    if (doorWall === 'south') {
+      const side = (w - doorW) / 2;
+      seg(cx - (doorW / 2 + side / 2), cz + hd, side, T);
+      seg(cx + (doorW / 2 + side / 2), cz + hd, side, T);
+      parts.push(box(cx, H - 0.25, cz + hd, doorW, 0.5, T, wallColor));
+    } else {
+      seg(cx, cz + hd, w, T);
+    }
+    seg(cx, cz - hd, w, T);
+    seg(cx - hw, cz, T, d);
+    seg(cx + hw, cz, T, d);
+    // Roof rim: four edge strips (never a slab — the camera looks in).
+    parts.push(box(cx, H + 0.15, cz - hd - 0.2, w + 0.8, 0.3, 0.7, 0x8a4a34));
+    parts.push(box(cx, H + 0.15, cz + hd + 0.2, w + 0.8, 0.3, 0.7, 0x8a4a34));
+    parts.push(box(cx - hw - 0.2, H + 0.15, cz, 0.7, 0.3, d + 0.8, 0x8a4a34));
+    parts.push(box(cx + hw + 0.2, H + 0.15, cz, 0.7, 0.3, d + 0.8, 0x8a4a34));
+    scene.add(meshOf(parts, true));
+    return { x: cx, z: cz };
+  }
+
+  buildGarage(scene) {
+    const room = this.buildRoom(scene, -56, 84, 30, 22, 0xcbb98f, 0x7d7d84, 8, 'south');
+    const props = meshOf([
+      box(-66, 0.5, 76, 5, 1, 2, 0x38618f),            // lift base
+      box(-66, 1.6, 76, 0.4, 2.2, 2, 0x2c3844),
+      box(-44, 0.55, 76, 6, 1.1, 1.2, 0x8a6f4d),        // workbench
+      box(-44, 0.55, 92, 6, 1.1, 1.2, 0x8a6f4d),
+      box(-68, 0.8, 92, 2.4, 1.6, 1.2, 0xa03a3a),       // tool cabinet
+      box(-40, 0.45, 84, 1, 0.9, 1, 0x333a42),          // tyre stack
+      box(-40, 1.3, 84, 1, 0.8, 1, 0x333a42),
+    ]);
+    scene.add(props);
+    this.colliders.push({ x: -66, z: 76, hw: 2.6, hd: 1.2 });
+    this.colliders.push({ x: -44, z: 76, hw: 3.1, hd: 0.8 });
+    this.colliders.push({ x: -44, z: 92, hw: 3.1, hd: 0.8 });
+    const poster = new THREE.Mesh(
+      new THREE.PlaneGeometry(4.6, 3),
+      new THREE.MeshLambertMaterial({ map: posterTexture(["TITO'S", 'GARAGE', 'FIX • TUNE'], '#e8e2d2', '#a03a3a') })
+    );
+    poster.position.set(-56, 2, 73.3);
     scene.add(poster);
-  });
-  const lamp = new THREE.PointLight(0xffc98a, 12, 11, 1.6);
-  lamp.position.set(cx, 2.7, cz);
-  scene.add(lamp);
-  return { center: { x: cx, z: cz }, door: { x: cx, z: cz + hd + 1.5 }, save: { x: cx - 4.6, z: cz - 1.2 }, inner };
-}
-
-// Tito's Garage: a drive-in repair bay on the lot at (114, 114). Stucco walls
-// with a wide south door facing the z=152 road, a pergola rim like the
-// safehouse, a painted repair pad, and a lift holding a customer's coupe.
-// The lift is solid; the pad is paint, so a car can roll onto it.
-function buildGarage(scene, colliders) {
-  const cx = 114, cz = 114, hw = 8, hd = 6, wallH = 3.4, th = 0.45;
-  const b = new ColorBucket();
-  const stucco = 0xe9d9b8, trim = 0x2e7f86;
-  const wall = (x, z, sx, sz) => { b.box(x, wallH / 2, z, sx, wallH, sz, stucco); colliders.push({ minX: x - sx / 2, maxX: x + sx / 2, minZ: z - sz / 2, maxZ: z + sz / 2 }); };
-  wall(cx, cz - hd, hw * 2 + th, th);                       // north wall
-  wall(cx - hw, cz, th, hd * 2);                            // west wall
-  wall(cx + hw, cz, th, hd * 2);                            // east wall
-  wall(cx - 5.5, cz + hd, 5.5, th);                         // south wall, west of the door
-  wall(cx + 5.5, cz + hd, 5.5, th);                         // south wall, east of the door (gap: 5 wide)
-  b.box(cx, wallH + 0.18, cz + hd, hw * 2 + th, 0.22, 0.7, trim); // teal lintel over the door
-  // pergola rim instead of a roof, same as the safehouse
-  b.box(cx, wallH + 0.3, cz - hd - 0.6, hw * 2 + 2.6, 0.28, 1.5, 0xc9563c);
-  b.box(cx, wallH + 0.3, cz + hd + 0.6, hw * 2 + 2.6, 0.28, 1.5, 0xc9563c);
-  b.box(cx - hw - 0.6, wallH + 0.3, cz, 1.5, 0.28, hd * 2 + 2.6, 0xc9563c);
-  b.box(cx + hw + 0.6, wallH + 0.3, cz, 1.5, 0.28, hd * 2 + 2.6, 0xc9563c);
-  for (let s = -hw + 1.5; s < hw; s += 2.6) b.box(cx + s, wallH + 0.28, cz, 0.5, 0.2, hd * 2, 0xb34a32);
-  b.quad(cx, cz, hw * 2, hd * 2, 0.1, 0x9a938a);             // concrete floor
-  b.quad(cx + 3, cz, 4.6, 6.6, 0.13, 0x2e7f86);             // the painted repair pad
-  b.quad(cx + 3, cz, 3.6, 5.6, 0.14, 0xd9cfbc);
-  // workbench along the north wall + tool cabinet
-  b.box(cx + 4.6, 0.55, cz - 5.2, 3.2, 0.14, 1.1, 0x8a6844);
-  b.box(cx + 3.2, 0.27, cz - 5.2, 0.14, 0.55, 0.9, 0x77572f); b.box(cx + 6, 0.27, cz - 5.2, 0.14, 0.55, 0.9, 0x77572f);
-  b.box(cx + 4.6, 1.05, cz - 5.35, 2.2, 0.5, 0.35, 0xb3231b); // red toolbox on the bench
-  b.box(cx + 7.2, 1.1, cz - 5.3, 1.1, 2.2, 0.6, 0x37474f);     // tool cabinet
-  b.box(cx + 7.2, 1.55, cz - 4.95, 0.9, 0.08, 0.08, 0xd8d3c3);
-  // crates and tire stacks in the west corners
-  b.box(cx - 6.9, 0.45, cz + 4.6, 0.9, 0.9, 0.9, 0xa67c4e); b.box(cx - 6.9, 1.3, cz + 4.6, 0.7, 0.7, 0.7, 0xb98d5f);
-  for (let i = 0; i < 3; i++) b.box(cx - 6.8, 0.28 + i * 0.52, cz - 4.9, 1.05, 0.5, 1.05, 0x1c1c20);
-  for (let i = 0; i < 2; i++) b.box(cx + 6.9, 0.28 + i * 0.52, cz + 4.7, 1.05, 0.5, 1.05, 0x1c1c20);
-  // the lift: two posts and a platform, holding a customer's coupe mid-repair
-  const liftX = cx - 4, liftZ = cz - 2;
-  b.box(liftX - 1.25, 1.15, liftZ, 0.32, 2.3, 0.32, 0xe39a2d);
-  b.box(liftX + 1.25, 1.15, liftZ, 0.32, 2.3, 0.32, 0xe39a2d);
-  b.box(liftX, 0.95, liftZ, 2.9, 0.18, 4.9, 0x4a4a52);
-  const prop = 0x3c6ec9;
-  b.box(liftX, 1.55, liftZ, 1.8, 0.5, 4.3, prop);             // prop car body, up on the lift
-  b.box(liftX, 1.95, liftZ - 0.25, 1.7, 0.45, 2.2, prop);
-  b.box(liftX, 2.0, liftZ - 0.25, 1.5, 0.38, 2.0, 0x9fd4de);
-  b.box(liftX, 2.26, liftZ - 0.25, 1.62, 0.09, 2.1, prop);
-  for (const [wx, wz] of [[-0.85, 1.45], [0.85, 1.45], [-0.85, -1.45], [0.85, -1.45]])
-    b.box(liftX + wx, 1.32, liftZ + wz, 0.28, 0.6, 0.6, 0x1c1c20);
-  colliders.push({ minX: liftX - 1.45, maxX: liftX + 1.45, minZ: liftZ - 2.45, maxZ: liftZ + 2.45 });
-  const mesh = b.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  mesh.castShadow = true; mesh.receiveShadow = true;
-  scene.add(mesh);
-  const poster = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.9),
-    new THREE.MeshBasicMaterial({ map: makePosterTexture('car') }));
-  poster.position.set(cx - 4.6, 1.9, cz - hd + th / 2 + 0.04);
-  scene.add(poster);
-  const lamp = new THREE.PointLight(0xffd9a0, 12, 12, 1.6);
-  lamp.position.set(cx, 2.8, cz);
-  scene.add(lamp);
-  return { center: { x: cx, z: cz }, door: { x: cx, z: cz + hd + 1.5 }, repair: { x: cx + 3, z: cz } };
-}
-
-// Tienda Brisa: a corner shop on the reserved lot at (-114, 38), west side.
-// Same construction language as the other interiors — stucco walls, a door
-// gap on the south side, a pergola rim so the sun and camera can see in —
-// but fitted as a shop: a counter with a till across the north side, stocked
-// shelves along the west wall, crates, and a warm lamp. The counter and
-// shelves are solid; the buying interaction lives in main.js (keys 1/2/3).
-function buildShop(scene, colliders) {
-  const cx = -114, cz = 38, hw = 7, hd = 5.5, wallH = 3.4, th = 0.45;
-  const b = new ColorBucket();
-  const stucco = 0xf2dfba, trim = 0x2e7f86;
-  const wall = (x, z, sx, sz) => { b.box(x, wallH / 2, z, sx, wallH, sz, stucco); colliders.push({ minX: x - sx / 2, maxX: x + sx / 2, minZ: z - sz / 2, maxZ: z + sz / 2 }); };
-  wall(cx, cz - hd, hw * 2 + th, th);                       // north wall
-  wall(cx - hw, cz, th, hd * 2);                            // west wall
-  wall(cx + hw, cz, th, hd * 2);                            // east wall
-  wall(cx - 4.4, cz + hd, 5.2, th);                         // south wall, west of door
-  wall(cx + 4.4, cz + hd, 5.2, th);                         // south wall, east of door
-  b.box(cx, wallH + 0.18, cz + hd, hw * 2 + th, 0.22, 0.7, trim); // teal lintel over the door
-  // pergola rim instead of a roof, same as the safehouse and the garage
-  b.box(cx, wallH + 0.3, cz - hd - 0.6, hw * 2 + 2.6, 0.28, 1.5, 0xc9563c);
-  b.box(cx, wallH + 0.3, cz + hd + 0.6, hw * 2 + 2.6, 0.28, 1.5, 0xc9563c);
-  b.box(cx - hw - 0.6, wallH + 0.3, cz, 1.5, 0.28, hd * 2 + 2.6, 0xc9563c);
-  b.box(cx + hw + 0.6, wallH + 0.3, cz, 1.5, 0.28, hd * 2 + 2.6, 0xc9563c);
-  for (let s = -hw + 1.5; s < hw; s += 2.6) b.box(cx + s, wallH + 0.28, cz, 0.5, 0.2, hd * 2, 0xb34a32);
-  b.quad(cx, cz, hw * 2, hd * 2, 0.1, 0xd9cfbc);             // pale tile floor
-  b.quad(cx, cz + 1.5, 7, 4.6, 0.13, 0x2e7f86);             // teal welcome mat inside the door
-  // the counter across the north side, with a till on top (solid)
-  b.box(cx, 0.55, cz - 4.1, 9.6, 1.1, 1.1, 0x8a6844);
-  b.box(cx, 1.16, cz - 4.1, 9.8, 0.1, 1.3, 0x5d4433);
-  b.box(cx + 3.4, 1.45, cz - 4.2, 0.9, 0.5, 0.7, 0x37474f);  // the till
-  b.box(cx + 3.4, 1.74, cz - 4.2, 0.7, 0.1, 0.5, 0xa8f0e0);  // till display glow
-  colliders.push({ minX: cx - 4.9, maxX: cx + 4.9, minZ: cz - 4.75, maxZ: cz - 3.45 });
-  // stocked shelves along the west wall: three levels of bright tins and boxes
-  const shelfCols = [0xe4572e, 0xe39a2d, 0x4d9a51, 0x3c6ec9, 0xc94f7c, 0xffd23a];
-  for (let lvl = 0; lvl < 3; lvl++) {
-    b.box(cx - 6.4, 0.5 + lvl * 0.85, cz - 0.5, 0.7, 0.08, 7.6, 0x77572f);
-    for (let i = 0; i < 7; i++) b.box(cx - 6.4, 0.78 + lvl * 0.85, cz - 3.6 + i * 1.05, 0.5, 0.5, 0.62, shelfCols[(i + lvl * 2) % shelfCols.length]);
+    const sign = new THREE.Mesh(
+      new THREE.PlaneGeometry(9, 1.8),
+      new THREE.MeshLambertMaterial({ map: posterTexture(["TITO'S GARAGE"], '#38618f', '#fff6df') })
+    );
+    sign.position.set(-56, 4.3, 95.4);
+    scene.add(sign);
+    // The repair pad.
+    const pad = new THREE.Mesh(new THREE.PlaneGeometry(6.4, 5), new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.55 }));
+    pad.rotation.x = -Math.PI / 2;
+    pad.position.set(-54, 0.06, 86);
+    scene.add(pad);
+    room.repair = { x: -54, z: 86 };
+    room.door = { x: -56, z: 95 };
+    return room;
   }
-  colliders.push({ minX: cx - 6.85, maxX: cx - 5.95, minZ: cz - 4.4, maxZ: cz + 3.4 });
-  // a freezer chest and crates by the east wall
-  b.box(cx + 6.1, 0.5, cz + 1.5, 1.3, 1.0, 3.6, 0xdfe9ec);
-  b.box(cx + 6.1, 1.04, cz + 1.5, 1.34, 0.08, 3.64, 0x9fd4de);
-  colliders.push({ minX: cx + 5.4, maxX: cx + 6.8, minZ: cz - 0.35, maxZ: cz + 3.35 });
-  b.box(cx + 5.9, 0.45, cz - 3.9, 0.9, 0.9, 0.9, 0xa67c4e); b.box(cx + 5.9, 1.3, cz - 3.9, 0.7, 0.7, 0.7, 0xb98d5f);
-  const mesh = b.build(new THREE.MeshLambertMaterial({ vertexColors: true }));
-  mesh.castShadow = true; mesh.receiveShadow = true;
-  scene.add(mesh);
-  const poster = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.9),
-    new THREE.MeshBasicMaterial({ map: makePosterTexture('surf') }));
-  poster.position.set(cx - 3.2, 1.9, cz - hd + th / 2 + 0.04);
-  scene.add(poster);
-  const lamp = new THREE.PointLight(0xffc98a, 12, 11, 1.6);
-  lamp.position.set(cx, 2.7, cz);
-  scene.add(lamp);
-  return { center: { x: cx, z: cz }, door: { x: cx, z: cz + hd + 1.5 }, counter: { x: cx, z: cz - 2.6 } };
+
+  buildShop(scene) {
+    const room = this.buildRoom(scene, 84, -56, 20, 16, 0xa8c4b8, 0xc9b48a, 2.6, 'south');
+    const props = meshOf([
+      box(84, 0.6, -61, 10, 1.2, 1.4, 0x7a4a2e),        // counter
+      box(76, 1, -50, 1.2, 2, 5, 0x2e7d6b),             // shelves
+      box(92, 1, -50, 1.2, 2, 5, 0x38618f),
+      box(76, 1, -61.5, 1.2, 2, 2.4, 0xb8862e),
+    ]);
+    scene.add(props);
+    this.colliders.push({ x: 84, z: -61, hw: 5.1, hd: 0.8 });
+    this.colliders.push({ x: 76, z: -50, hw: 0.8, hd: 2.6 });
+    this.colliders.push({ x: 92, z: -50, hw: 0.8, hd: 2.6 });
+    const sign = new THREE.Mesh(
+      new THREE.PlaneGeometry(8, 1.7),
+      new THREE.MeshLambertMaterial({ map: posterTexture(['TIENDA BRISA'], '#2e7d6b', '#fff6df') })
+    );
+    sign.position.set(84, 4.2, -47.6);
+    scene.add(sign);
+    room.counter = { x: 84, z: -58.6 };
+    room.door = { x: 84, z: -48 };
+    return room;
+  }
+
+  buildSafehouse(scene) {
+    const room = this.buildRoom(scene, -196, -196, 18, 15, 0xd4c5a5, 0x9a7c58, 2.4, 'south');
+    const props = meshOf([
+      box(-201, 0.4, -200, 2.2, 0.8, 4.4, 0x38618f),    // bed
+      box(-201, 0.75, -202, 2.2, 0.25, 1, 0xf0ece2),
+      box(-191, 0.5, -193, 3.4, 1, 1.6, 0x8a6f4d),      // table
+      box(-191, 0.9, -200, 2.6, 1.8, 0.9, 0x5a4632),    // dresser
+    ]);
+    scene.add(props);
+    this.colliders.push({ x: -201, z: -200, hw: 1.2, hd: 2.3 });
+    this.colliders.push({ x: -191, z: -193, hw: 1.8, hd: 0.9 });
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(1.1, 16), new THREE.MeshBasicMaterial({ color: 0x9fe870, transparent: true, opacity: 0.6 }));
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.set(-196, 0.06, -192);
+    scene.add(disc);
+    room.save = { x: -196, z: -192 };
+    room.door = { x: -196, z: -188.5 };
+    return room;
+  }
+
+  buildLandmarks(scene) {
+    // Police station and hospital get signs in front of their blocks; the
+    // buildings themselves come from the normal block generation.
+    const mk = (text, color, x, z) => {
+      const s = new THREE.Mesh(new THREE.PlaneGeometry(10, 2), new THREE.MeshLambertMaterial({ map: posterTexture([text], color, '#ffffff') }));
+      s.position.set(x, 3.4, z);
+      scene.add(s);
+    };
+    mk('SOLMAR BAY PD', '#22304a', 20, 48.6);
+    mk('SOLMAR GENERAL', '#e8e2d2', -20, 48.6);
+    // Marisol Vega's beachfront office on the reserved plaza: one small
+    // building with its door facing the open plaza where Rico starts.
+    const office = meshOf([
+      box(38, 3.5, 86, 14, 7, 12, 0xe3cfa5),
+      box(38, 7.3, 86, 15, 0.6, 13, 0xc95f2e),
+      box(30.8, 1.1, 86, 0.3, 2.2, 1.6, 0x5a4632),
+    ]);
+    scene.add(office);
+    this.colliders.push({ x: 38, z: 86, hw: 7, hd: 6 });
+    const vs = new THREE.Mesh(
+      new THREE.PlaneGeometry(8, 1.7),
+      new THREE.MeshLambertMaterial({ map: posterTexture(['VEGA • FIXER'], '#38618f', '#fff6df') })
+    );
+    vs.position.set(30.7, 4.6, 86);
+    vs.rotation.y = -Math.PI / 2;
+    scene.add(vs);
+    // Beach umbrellas.
+    const parts = [];
+    for (let i = 0; i < 10; i++) {
+      const x = -240 + i * 48;
+      parts.push(box(x, 1.1, -228, 0.12, 2.2, 0.12, 0x8a6f4d));
+      parts.push(box(x, 2.3, -228, 3, 0.25, 3, i % 2 ? 0xc95f2e : 0x2e7d8f));
+    }
+    scene.add(meshOf(parts));
+  }
+
+  update(dt, t) {
+    if (this.waterTex) this.waterTex.offset.set((t * 0.008) % 1, (t * 0.005) % 1);
+    for (const b of this.boats) {
+      b.mesh.position.y = Math.sin(t * 0.7 + b.phase) * 0.12;
+      b.mesh.rotation.z = Math.sin(t * 0.5 + b.phase) * 0.02;
+    }
+  }
 }

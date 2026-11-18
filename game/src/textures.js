@@ -1,160 +1,159 @@
-// v3: unchanged — Tito's Garage reuses the existing poster and facade painters as they were.
-// textures.js — every texture in Solmar Bay is painted on a canvas at startup:
-// building facades with windows, awnings and invented shop signs, a roof patch,
-// interior posters, a water shimmer sheet and the soft round blob-shadow disc.
-// No image files, no network: the city paints its own skin.
+// textures.js — every texture is painted on a canvas at boot: building
+// facades with invented shop signs, the city ground plan (roads, lane
+// markings, sidewalks, sand), the sea, posters and interior walls.
 
-import * as THREE from '../vendor/three.min.js';
+import * as THREE from 'three';
 
-export const SHOP_NAMES = [
-  'CAFE SOLMAR', 'PALMA SHOES', 'HOTEL BRISA', 'TACO MAREA', 'SURF & SAND',
-  'BANCO DEL SOL', 'FARMACIA LUNA', 'PIZZA FARO', 'MARINA MART', 'GELATO RIO',
-  'BAR EL FARO', 'LIBROS SOL', 'GYM OLEAJE', 'FLORISTERIA', 'CINE BRISA',
-  'PANADERIA SOL', 'JOYERIA MAR', 'TALLER RICO', 'PELUQUERIA', 'MERCADO 9',
+function canvasTex(w, h, draw, repeat) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  if (repeat) {
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+  }
+  t.anisotropy = 2;
+  return t;
+}
+
+const SIGNS = [
+  ['CAFE SOL', '#c95f2e'], ['TIENDA BRISA', '#2e7d6b'], ['HOTEL MAR', '#38618f'],
+  ['PALMA GYM', '#7a4a8f'], ['BAR LA BRISA', '#a03a3a'], ['FOTO RUIZ', '#4a6b2f'],
+  ['BANCO BAY', '#5a5f6e'], ['PIZZA ONDA', '#b8862e'], ['SURF SHACK', '#2e7d8f'],
+  ['JOYAS VEGA', '#8f6a2e'],
 ];
 
-const WALL_BASES = ['#f5ead6', '#f2d8b3', '#eec9a3', '#f7f0e4', '#e8b98d', '#dfe9ec', '#f3cfc0', '#e6ddc8'];
-const TRIM_COLORS = ['#c9563c', '#2e7f86', '#e39a2d', '#7a4a8c', '#3c6ec9', '#4d9a51', '#c94f7c', '#8c6a3f'];
-
-// The atlas: 8 facade tiles across the top (each 256x512 of a 2048x1024 canvas),
-// a plain roof patch bottom-left, and a spare painted patch bottom-right.
-export const ATLAS = { cols: 8, tileW: 256, tileH: 512, width: 2048, height: 1024 };
-export function tileUv(index) {
-  return { u: (index % ATLAS.cols) * ATLAS.tileW / ATLAS.width, v: 0.5, w: ATLAS.tileW / ATLAS.width, h: 0.5 };
-}
-export const ROOF_UV = { u: 40 / ATLAS.width, v: 60 / ATLAS.height };
-
-function paintFacade(ctx, tileIndex, rng) {
-  const x0 = tileIndex * ATLAS.tileW, y0 = 0, w = ATLAS.tileW, h = ATLAS.tileH;
-  const base = WALL_BASES[tileIndex % WALL_BASES.length];
-  const trim = TRIM_COLORS[tileIndex % TRIM_COLORS.length];
-  ctx.fillStyle = base; ctx.fillRect(x0, y0, w, h);
-  // gentle sun-bleach gradient, lighter at the top
-  const grad = ctx.createLinearGradient(0, y0, 0, y0 + h);
-  grad.addColorStop(0, 'rgba(255,240,200,0.20)'); grad.addColorStop(1, 'rgba(120,60,20,0.10)');
-  ctx.fillStyle = grad; ctx.fillRect(x0, y0, w, h);
-  // window grid: floors of lit and shaded windows with little shutters
-  const cols = 5, floors = 9, wx = w / cols, wy = (h - 96) / floors;
-  for (let f = 0; f < floors; f++) {
-    for (let c = 0; c < cols; c++) {
-      const lit = rng.chance(0.24);
-      ctx.fillStyle = lit ? '#ffd977' : (rng.chance(0.5) ? '#7d99a8' : '#5f8296');
-      const px = x0 + c * wx + 9, py = y0 + 14 + f * wy;
-      ctx.fillRect(px, py, wx - 18, wy - 16);
-      ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fillRect(px, py, wx - 18, 4);
-      if (rng.chance(0.4)) { ctx.fillStyle = trim; ctx.fillRect(px - 3, py, 3, wy - 16); ctx.fillRect(px + wx - 18, py, 3, wy - 16); }
-      if (f % 3 === 2) { ctx.fillStyle = 'rgba(90,60,40,0.35)'; ctx.fillRect(px - 4, py + wy - 13, wx - 10, 4); } // balcony rail shadow
+export function facadeTexture(rng, tone) {
+  return canvasTex(256, 512, (g, w, h) => {
+    const bases = ['#d9b48c', '#c9d1d4', '#e3cfa5', '#b8c4c9', '#d4a08a', '#cbb98f'];
+    g.fillStyle = tone || bases[Math.floor(rng() * bases.length)];
+    g.fillRect(0, 0, w, h);
+    // Shopfront and sign on the ground floor.
+    const sign = SIGNS[Math.floor(rng() * SIGNS.length)];
+    g.fillStyle = '#3a3f46';
+    g.fillRect(0, h - 92, w, 92);
+    g.fillStyle = sign[1];
+    g.fillRect(8, h - 132, w - 16, 44);
+    g.fillStyle = '#fff6df';
+    g.font = 'bold 25px Verdana';
+    g.textAlign = 'center';
+    g.fillText(sign[0], w / 2, h - 101);
+    g.fillStyle = '#9fd4e8';
+    for (let i = 0; i < 3; i++) g.fillRect(18 + i * 80, h - 78, 62, 58);
+    // Window grid above.
+    for (let y = 26; y < h - 160; y += 46) {
+      for (let x = 20; x < w - 30; x += 52) {
+        const lit = rng() < 0.3;
+        g.fillStyle = lit ? '#ffd98a' : '#5d7484';
+        g.fillRect(x, y, 34, 30);
+        g.fillStyle = 'rgba(255,255,255,.25)';
+        g.fillRect(x, y, 34, 6);
+      }
     }
-  }
-  // ground floor: a run of small shopfronts with mullioned glass and a door
-  const gy = y0 + h - 92;
-  ctx.fillStyle = '#7d5f45'; ctx.fillRect(x0, gy, w, 92);
-  ctx.fillStyle = '#4a3828'; ctx.fillRect(x0 + 10, gy + 26, w - 20, 66);
-  for (let pane = 0; pane < 5; pane++) {
-    const px = x0 + 16 + pane * 47;
-    ctx.fillStyle = '#a8d8e2'; ctx.fillRect(px, gy + 33, 38, 52);
-    ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fillRect(px, gy + 33, 38, 7);
-    ctx.fillStyle = '#4a3828'; ctx.fillRect(px + 17, gy + 33, 4, 52);
-  }
-  ctx.fillStyle = '#5d4433'; ctx.fillRect(x0 + w / 2 - 13, gy + 30, 26, 62); // door
-  ctx.fillStyle = '#ffd977'; ctx.fillRect(x0 + w / 2 + 5, gy + 58, 4, 4);     // door knob
-  ctx.fillStyle = trim;
-  for (let s = 0; s < 6; s++) ctx.fillRect(x0 + s * (w / 6), gy - 14, w / 6 - 3, 15); // awning stripes base
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  for (let s = 0; s < 3; s++) ctx.fillRect(x0 + (2 * s + 1) * (w / 6), gy - 14, w / 6 - 3, 15);
-  ctx.fillStyle = '#2d1d12'; ctx.fillRect(x0 + 8, gy - 44, w - 16, 28);
-  ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 19px Verdana, sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText(SHOP_NAMES[tileIndex * 2 % SHOP_NAMES.length], x0 + w / 2, gy - 23, w - 20);
-  // grime at the base
-  ctx.fillStyle = 'rgba(80,50,25,0.18)'; ctx.fillRect(x0, y0 + h - 8, w, 8);
+    // A poster or two.
+    g.fillStyle = rng() < 0.5 ? '#e8e2d2' : '#d8e4ea';
+    g.fillRect(14, h - 210, 52, 66);
+    g.fillStyle = '#b3502e';
+    g.font = 'bold 11px Verdana';
+    g.fillText('SOL', 40, h - 182);
+    g.fillText('FEST', 40, h - 166);
+  });
 }
 
-export function makeFacadeAtlas(rng) {
-  const canvas = document.createElement('canvas');
-  canvas.width = ATLAS.width; canvas.height = ATLAS.height;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#b09a80'; ctx.fillRect(0, 512, 2048, 512); // lower half base
-  for (let i = 0; i < ATLAS.cols; i++) paintFacade(ctx, i, rng);
-  // roof patch: warm gravel with vents speckle
-  ctx.fillStyle = '#a68a6d'; ctx.fillRect(0, 512, 220, 220);
-  ctx.fillStyle = 'rgba(70,50,30,0.25)';
-  for (let i = 0; i < 260; i++) ctx.fillRect(rng.range(0, 218), 512 + rng.range(0, 218), 2, 2);
-  ctx.fillStyle = '#8a715a'; ctx.fillRect(28, 540, 34, 22); ctx.fillRect(120, 620, 26, 18);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+export function groundTexture() {
+  // One big plan of the city: world -300..300 maps onto the canvas.
+  const S = 2048;
+  const toPx = (v) => ((v + 300) / 600) * S;
+  const tex = canvasTex(S, S, (g) => {
+    g.fillStyle = '#8fae6b';
+    g.fillRect(0, 0, S, S);
+    // South beach sand.
+    g.fillStyle = '#ecd29a';
+    g.fillRect(0, toPx(212), S, S - toPx(212));
+    // Marina bay (north-east water inlet is a mesh; this is its shore sand).
+    g.fillStyle = '#e6cd92';
+    g.fillRect(toPx(92), 0, S - toPx(92), S - toPx(208));
+    // Blocks: pavement slabs between the roads.
+    g.fillStyle = '#b9b3a4';
+    for (let bx = -280; bx < 280; bx += 56) {
+      for (let bz = -280; bz < 280; bz += 56) {
+        g.fillRect(toPx(bx + 8), toPx(bz + 8), toPx(bx + 48) - toPx(bx + 8), toPx(bz + 48) - toPx(bz + 8));
+      }
+    }
+    // Roads along every grid line.
+    g.fillStyle = '#454a52';
+    for (let v = -280; v <= 280; v += 56) {
+      g.fillRect(toPx(v - 7), 0, toPx(v + 7) - toPx(v - 7), S);
+      g.fillRect(0, toPx(v - 7), S, toPx(v + 7) - toPx(v - 7));
+    }
+    // Sidewalk edges.
+    g.strokeStyle = '#cfc9b8';
+    g.lineWidth = 3;
+    for (let v = -280; v <= 280; v += 56) {
+      for (const off of [-8.5, 8.5]) {
+        g.beginPath(); g.moveTo(toPx(v + off), 0); g.lineTo(toPx(v + off), S); g.stroke();
+        g.beginPath(); g.moveTo(0, toPx(v + off)); g.lineTo(S, toPx(v + off)); g.stroke();
+      }
+    }
+    // Lane dashes.
+    g.strokeStyle = '#e8d98a';
+    g.lineWidth = 3;
+    g.setLineDash([16, 14]);
+    for (let v = -280; v <= 280; v += 56) {
+      g.beginPath(); g.moveTo(toPx(v), 0); g.lineTo(toPx(v), S); g.stroke();
+      g.beginPath(); g.moveTo(0, toPx(v)); g.lineTo(S, toPx(v)); g.stroke();
+    }
+    g.setLineDash([]);
+    // Crosswalks at intersections.
+    g.fillStyle = 'rgba(240,240,235,.75)';
+    for (let x = -280; x <= 280; x += 56) {
+      for (let z = -280; z <= 280; z += 56) {
+        for (let i = -2; i <= 2; i++) {
+          g.fillRect(toPx(x + i * 2.6 - 1), toPx(z - 11), 4, 7);
+          g.fillRect(toPx(x + i * 2.6 - 1), toPx(z + 4), 4, 7);
+        }
+      }
+    }
+  });
   return tex;
 }
 
-// Small painted posters for the safehouse walls.
-export function makePosterTexture(kind) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 160;
-  const ctx = canvas.getContext('2d');
-  if (kind === 'surf') {
-    ctx.fillStyle = '#ffd98a'; ctx.fillRect(0, 0, 128, 160);
-    ctx.fillStyle = '#e4572e'; ctx.beginPath(); ctx.arc(64, 58, 26, 0, 7); ctx.fill();
-    ctx.fillStyle = '#2e7f86'; ctx.fillRect(0, 96, 128, 64);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 17px Verdana'; ctx.textAlign = 'center';
-    ctx.fillText('SURF', 64, 128); ctx.fillText('SOLMAR', 64, 148);
-  } else if (kind === 'car') {
-    ctx.fillStyle = '#26355e'; ctx.fillRect(0, 0, 128, 160);
-    ctx.fillStyle = '#ffb03a'; ctx.fillRect(18, 74, 92, 22);
-    ctx.fillStyle = '#2b2b2b'; ctx.beginPath(); ctx.arc(38, 100, 11, 0, 7); ctx.arc(92, 100, 11, 0, 7); ctx.fill();
-    ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 15px Verdana'; ctx.textAlign = 'center';
-    ctx.fillText('VELOZ GT', 64, 40); ctx.fillText('1978', 64, 132);
-  } else {
-    ctx.fillStyle = '#f3e9d2'; ctx.fillRect(0, 0, 128, 160);
-    ctx.fillStyle = '#c9563c'; ctx.font = 'bold 16px Verdana'; ctx.textAlign = 'center';
-    ctx.fillText('WANTED', 64, 34);
-    ctx.fillStyle = '#8a715a'; ctx.fillRect(39, 48, 50, 56);
-    ctx.fillStyle = '#5a4632'; ctx.fillRect(49, 62, 9, 9); ctx.fillRect(70, 62, 9, 9); ctx.fillRect(54, 88, 20, 5);
-    ctx.fillStyle = '#333'; ctx.font = 'bold 12px Verdana'; ctx.fillText('REWARD $500', 64, 132);
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+export function waterTexture() {
+  return canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = '#2e7d9b';
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(180,235,250,.5)';
+    g.lineWidth = 2;
+    for (let i = 0; i < 26; i++) {
+      const y = (i * 37) % h;
+      const x = (i * 53) % w;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.quadraticCurveTo(x + 14, y - 4, x + 30, y);
+      g.stroke();
+    }
+  }, true);
 }
 
-// Tileable shimmer sheet for the sea; offset scrolls each frame.
-export function makeWaterTexture(rng) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 256;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#2e7fa8'; ctx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 300; i++) {
-    ctx.fillStyle = rng.chance(0.5) ? 'rgba(255,255,255,0.13)' : 'rgba(10,60,90,0.16)';
-    ctx.fillRect(rng.range(0, 250), rng.range(0, 254), rng.range(8, 30), 2);
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(10, 4);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+export function posterTexture(lines, bg, fg) {
+  return canvasTex(128, 160, (g, w, h) => {
+    g.fillStyle = bg;
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = fg;
+    g.font = 'bold 17px Verdana';
+    g.textAlign = 'center';
+    lines.forEach((ln, i) => g.fillText(ln, w / 2, 52 + i * 26));
+    g.strokeStyle = fg;
+    g.strokeRect(6, 6, w - 12, h - 12);
+  });
 }
 
-// Soft radial disc used as a cheap blob shadow under cars and people.
-export function makeBlobTexture() {
-  const canvas = document.createElement('canvas');
-  canvas.width = 64; canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  const g = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
-  g.addColorStop(0, 'rgba(20,10,5,0.42)'); g.addColorStop(1, 'rgba(20,10,5,0)');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
-  return new THREE.CanvasTexture(canvas);
-}
-
-// Vertical warm gradient used as the sky backdrop.
-export function makeSkyTexture() {
-  const canvas = document.createElement('canvas');
-  canvas.width = 16; canvas.height = 256;
-  const ctx = canvas.getContext('2d');
-  const g = ctx.createLinearGradient(0, 0, 0, 256);
-  g.addColorStop(0, '#7ec3e8'); g.addColorStop(0.45, '#a8d4ec');
-  g.addColorStop(0.72, '#f7d9a0'); g.addColorStop(1, '#ffc98a');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, 16, 256);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+export function plainTexture(color) {
+  return canvasTex(32, 32, (g, w, h) => {
+    g.fillStyle = color;
+    g.fillRect(0, 0, w, h);
+  });
 }

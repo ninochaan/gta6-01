@@ -1,106 +1,144 @@
-// hud.js — every piece of screen furniture: health, cash, wanted stars,
-// weapon readout, objective line, prompts, dialogue banners, mission titles,
-// the bust meter, damage vignette and the canvas minimap with live blips.
-// v4: the minimap gains a steady teal blip for Tienda Brisa, and the weapon
-// line (set from main.js) reports Rico's vest percentage while he wears one.
-
-import { ROAD_LINES, BOULEVARD_Z } from './city.js';
-
-const $ = (id) => document.getElementById(id);
+// hud.js — the heads-up display: cash, stars, health and armour bars,
+// weapon readout, objective banner, interaction prompt, bust meter, and
+// the live minimap with blips for the player, police, the objective,
+// activities and interiors.
 
 export class Hud {
   constructor() {
-    this.health = $('healthbar'); this.cash = $('cash'); this.pkgs = $('packages');
-    this.weapon = $('weapon'); this.wanted = $('wanted'); this.objective = $('objective');
-    this.prompt = $('prompt'); this.bannerEl = $('banner'); this.timer = $('timer');
-    this.titleEl = $('missiontitle'); this.speedo = $('speedo');
-    this.vignette = $('vignette'); this.bustwrap = $('bustwrap'); this.bustfill = $('bustfill');
-    this.map = $('minimap').getContext('2d');
-    this.bannerQueue = []; this.bannerT = 0; this.titleT = 0;
-    this.lastStars = -1; this.hurtT = 0;
-    this.wanted.innerHTML = [0, 1, 2, 3, 4].map(() => '<span>★</span>').join('');
-    this.starEls = [...this.wanted.children];
+    this.el = {
+      cash: document.getElementById('cash'),
+      stars: document.getElementById('stars'),
+      ammo: document.getElementById('ammo'),
+      health: document.getElementById('healthfill'),
+      armour: document.getElementById('armourfill'),
+      banner: document.getElementById('banner'),
+      prompt: document.getElementById('prompt'),
+      bustWrap: document.getElementById('bustwrap'),
+      bustFill: document.getElementById('bustfill'),
+      toast: document.getElementById('toast'),
+      map: document.getElementById('minimap'),
+    };
+    this.mapCtx = this.el.map.getContext('2d');
+    this.bannerT = 0;
+    this.toastT = 0;
+    this.cashValue = 0;
   }
-  setHealth(v) { this.health.style.width = Math.max(0, Math.min(100, v)) + '%'; }
-  setCash(v) { this.cash.textContent = '$' + Math.floor(v).toLocaleString('en-US'); }
-  setPackages(n, total) { this.pkgs.textContent = `◆ Packages ${n} / ${total}`; }
-  setWeapon(text) { this.weapon.textContent = text; }
-  setWanted(stars) {
-    const lit = Math.ceil(stars - 0.001);
-    if (lit === this.lastStars) return;
-    this.lastStars = lit;
-    this.starEls.forEach((el, i) => el.className = i < lit ? 'lit' : '');
+
+  setCash(n) {
+    this.cashValue = n;
+    if (this.el.cash) this.el.cash.textContent = '$' + Math.floor(n);
   }
-  setObjective(text) { if (this.objective.textContent !== text) this.objective.textContent = text; }
+
+  banner(text) {
+    if (this.el.banner) {
+      this.el.banner.textContent = text;
+      this.el.banner.style.display = text ? 'block' : 'none';
+    }
+    this.bannerT = 6;
+  }
+
+  toast(text) {
+    if (this.el.toast) this.el.toast.textContent = text;
+    this.toastT = 3;
+  }
+
   setPrompt(text) {
-    if (!text) { this.prompt.style.display = 'none'; return; }
-    this.prompt.style.display = 'block';
-    if (this.prompt.textContent !== text) this.prompt.textContent = text;
-  }
-  setTimer(text) {
-    if (!text) { this.timer.style.display = 'none'; return; }
-    this.timer.style.display = 'block';
-    if (this.timer.textContent !== text) this.timer.textContent = text;
-  }
-  setSpeed(kmh, inCar) {
-    this.speedo.style.display = inCar ? 'block' : 'none';
-    if (inCar) this.speedo.innerHTML = `${Math.abs(Math.round(kmh))}<small>KM/H</small>`;
-  }
-  setBust(ratio) {
-    this.bustwrap.style.display = ratio > 0.02 ? 'block' : 'none';
-    this.bustfill.style.width = Math.round(ratio * 100) + '%';
-  }
-  hurt() { this.hurtT = 0.55; }
-  banner(who, line, dur = 3.4) { this.bannerQueue.push({ who, line, dur }); }
-  missionTitle(big, sub) {
-    this.titleEl.querySelector('.big').textContent = big;
-    this.titleEl.querySelector('.sub').textContent = sub;
-    this.titleEl.style.display = 'block';
-    this.titleT = 3.2;
-  }
-  update(dt) {
-    if (this.hurtT > 0) { this.hurtT -= dt; this.vignette.style.opacity = Math.min(0.9, this.hurtT).toFixed(2); }
-    else this.vignette.style.opacity = '0';
-    if (this.titleT > 0) { this.titleT -= dt; if (this.titleT <= 0) this.titleEl.style.display = 'none'; }
-    if (this.bannerT > 0) { this.bannerT -= dt; if (this.bannerT <= 0) this.bannerEl.style.display = 'none'; }
-    else if (this.bannerQueue.length) {
-      const b = this.bannerQueue.shift();
-      this.bannerEl.querySelector('.who').textContent = b.who;
-      this.bannerEl.querySelector('.line').textContent = b.line;
-      this.bannerEl.style.display = 'block';
-      this.bannerT = b.dur;
+    if (this.el.prompt) {
+      this.el.prompt.textContent = text || '';
+      this.el.prompt.style.display = text ? 'block' : 'none';
     }
   }
-  // North-up whole-city minimap: roads, the bay, and a blip per live system.
-  drawMinimap(G) {
-    const c = this.map, S = 184, scale = S / 580;
-    const px = (x) => (x + 290) * scale, pz = (z) => (z + 290) * scale;
-    c.fillStyle = '#cdbb9c'; c.fillRect(0, 0, S, S);
-    c.fillStyle = '#2e7fa8'; c.fillRect(0, pz(240), S, S - pz(240));
-    c.fillStyle = '#e8cf9e'; c.fillRect(0, pz(204), S, pz(240) - pz(204));
-    c.strokeStyle = '#55555e'; c.lineWidth = 3;
-    for (const l of ROAD_LINES) {
-      c.beginPath(); c.moveTo(px(l), 0); c.lineTo(px(l), pz(BOULEVARD_Z)); c.stroke();
-      if (l < 200) { c.beginPath(); c.moveTo(0, pz(l)); c.lineTo(S, pz(l)); c.stroke(); }
+
+  update(dt, H, objective) {
+    this.bannerT -= dt;
+    this.toastT -= dt;
+    if (this.toastT <= 0 && this.el.toast) this.el.toast.textContent = '';
+    this.setCash(H.cash);
+    if (this.el.stars) {
+      const lvl = H.wanted.level;
+      this.el.stars.textContent = lvl > 0 ? '\u2605'.repeat(lvl) + '\u2606'.repeat(5 - lvl) : '';
     }
-    c.beginPath(); c.moveTo(0, pz(BOULEVARD_Z)); c.lineTo(S, pz(BOULEVARD_Z)); c.stroke();
-    const blip = (x, z, color, r) => { c.fillStyle = color; c.beginPath(); c.arc(px(x), pz(z), r, 0, 7); c.fill(); };
-    for (const p of G.packageBlips) blip(p.x, p.z, 'rgba(255,255,255,0.75)', 1.6);
-    if (G.blips.shop) blip(G.blips.shop.x, G.blips.shop.z, '#2affd8', 2.8);
-    if (G.blips.taxi) blip(G.blips.taxi.x, G.blips.taxi.z, '#51e07a', 3.4);
-    if (G.blips.race) blip(G.blips.race.x, G.blips.race.z, '#c77dff', 3.4);
-    for (const cop of G.blips.police) blip(cop.x, cop.z, (performance.now() % 600 < 300) ? '#ff4030' : '#3a7bff', 2.6);
-    if (G.blips.objective) {
-      const pulse = 3.6 + Math.sin(performance.now() * 0.006) * 1.1;
-      blip(G.blips.objective.x, G.blips.objective.z, '#ffd23a', pulse);
+    if (this.el.health) this.el.health.style.width = Math.max(0, H.player.health) + '%';
+    if (this.el.armour) this.el.armour.style.width = Math.max(0, Math.min(100, H.player.armour)) + '%';
+    if (this.el.ammo) {
+      this.el.ammo.textContent = H.combat.reloadT > 0
+        ? 'PISTOL — RELOADING'
+        : 'PISTOL ' + H.combat.mag + ' / ' + H.combat.reserve;
     }
-    // the player: a white wedge pointing where the camera faces
-    const p = G.playerPos;
-    c.save();
-    c.translate(px(p.x), pz(p.z));
-    c.rotate(-(G.cameraYaw || 0));
-    c.fillStyle = '#ffffff';
-    c.beginPath(); c.moveTo(0, -5.5); c.lineTo(3.6, 4.4); c.lineTo(-3.6, 4.4); c.closePath(); c.fill();
-    c.restore();
+    const bust = H.police.bust || 0;
+    if (this.el.bustWrap) {
+      this.el.bustWrap.style.display = bust > 0.02 ? 'block' : 'none';
+      this.el.bustFill.style.width = Math.round(bust * 100) + '%';
+    }
+    // Keep the current objective on the banner when nothing fresher shows.
+    if (this.bannerT <= 0 && objective && this.el.banner) {
+      this.el.banner.textContent = objective.label || 'Explore Solmar Bay';
+      this.el.banner.style.display = 'block';
+    }
+    this.drawMap(H, objective);
+  }
+
+  drawMap(H, objective) {
+    const g = this.mapCtx;
+    if (!g) return;
+    const S = 176;
+    const half = 88;
+    const scale = S / 600;
+    const toX = (x) => half + x * scale;
+    const toY = (z) => half + z * scale;
+    g.fillStyle = '#274b63';
+    g.fillRect(0, 0, S, S);
+    g.fillStyle = '#3d5a40';
+    g.fillRect(0, 0, toX(252), S);
+    // Roads.
+    g.strokeStyle = 'rgba(220,220,210,.35)';
+    g.lineWidth = 2;
+    for (let v = -280; v <= 280; v += 56) {
+      g.beginPath(); g.moveTo(toX(v), 0); g.lineTo(toX(v), S); g.stroke();
+      g.beginPath(); g.moveTo(0, toY(v)); g.lineTo(S, toY(v)); g.stroke();
+    }
+    const blip = (x, z, color, r) => {
+      g.fillStyle = color;
+      g.beginPath();
+      g.arc(toX(x), toY(z), r || 3, 0, 6.29);
+      g.fill();
+    };
+    // Interiors and named places.
+    blip(H.city.garage.x, H.city.garage.z, '#ffb347');
+    blip(H.city.shop.x, H.city.shop.z, '#7de8a8');
+    blip(H.city.policeStation.x, H.city.policeStation.z, '#7db4ff');
+    blip(H.city.hospital.x, H.city.hospital.z, '#ff9d94');
+    // Activity markers.
+    if (H.activities.taxi) {
+      const t = H.activities.taxi.phase === 'pickup'
+        ? { x: H.activities.taxi.ped.x, z: H.activities.taxi.ped.z }
+        : H.activities.taxi.dest;
+      blip(t.x, t.z, '#5ea8e8', 4);
+    }
+    if (H.activities.race) {
+      const p = H.activities.race.points[H.activities.race.idx];
+      if (p) blip(p.x, p.z, '#ffd94d', 4);
+    }
+    // Police in red-blue.
+    for (const c of H.police.cars) blip(c.x, c.z, '#ff5e4d', 3);
+    for (const o of H.police.officers) blip(o.x, o.z, '#ff5e4d', 2);
+    // Gang in purple when a fight is live.
+    if (H.combat) for (const f of H.combat.gang) if (!f.dead) blip(f.x, f.z, '#c95ef0', 3);
+    // Objective in gold.
+    if (objective) blip(objective.x, objective.z, '#ffe14d', 4.5);
+    // Player arrow in white.
+    const px = toX(H.player.x);
+    const py = toY(H.player.z);
+    // In a car the arrow follows the car's own (sin, cos) heading;
+    // on foot it follows the camera view forward, which in (sin,
+    // cos) terms is cameraYaw + PI (see the convention in main.js).
+    const yaw = H.player.car ? H.player.car.heading : H.cameraYaw + Math.PI;
+    g.fillStyle = '#ffffff';
+    g.beginPath();
+    g.moveTo(px + Math.sin(yaw) * 6, py + Math.cos(yaw) * 6);
+    g.lineTo(px + Math.sin(yaw + 2.5) * 5, py + Math.cos(yaw + 2.5) * 5);
+    g.lineTo(px + Math.sin(yaw - 2.5) * 5, py + Math.cos(yaw - 2.5) * 5);
+    g.closePath();
+    g.fill();
   }
 }
